@@ -42,3 +42,5 @@ Agent 模块：我们使用langchain来构建agent，当单因子策略信号触
 
 docs 目录下的内容都是拿来阅读和参考的，千万不要直接使用或者引用其中的代码。
 
+对于 langchain，我们使用 langchain-anthropic 来构建 agent，并且我设置了第三方的 api 地址，https://api.minimax.io/anthropic，请基于我的配置来构建调用，不要使用 anthropic 官方的 api 地址。
+

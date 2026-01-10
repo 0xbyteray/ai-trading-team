@@ -45,12 +45,57 @@ Copy `env.example` to `.env` and configure API keys and trading parameters. See 
 ## Project Structure
 
 ```
-src/ai_trading_team/     # Main package
-  config.py              # Configuration management (loads from .env)
-  logging.py             # Logging setup (outputs to logs/)
-tests/                   # Test files
-logs/                    # Runtime logs (gitignored)
-docs/                    # Reference materials (do not import)
+src/ai_trading_team/
+├── config.py              # Configuration management (loads from .env)
+├── logging.py             # Logging setup (outputs to logs/)
+├── core/                  # Core infrastructure
+│   ├── types.py           # Global enums (Side, OrderType, etc.)
+│   ├── events.py          # Event system for inter-module communication
+│   ├── data_pool.py       # Thread-safe real-time data storage
+│   └── signal_queue.py    # Timestamped signal queue
+├── data/                  # Market data (Binance source)
+│   ├── models.py          # Data models (Kline, Ticker, OrderBook)
+│   ├── binance/           # Binance REST + WebSocket
+│   └── manager.py         # Data manager
+├── indicators/            # Technical indicators (talipp wrapper)
+│   ├── base.py            # Indicator base class
+│   ├── registry.py        # Indicator registry
+│   └── technical.py       # RSI, MACD, BB, ATR implementations
+├── strategy/              # Mechanical strategies
+│   ├── base.py            # Strategy base class
+│   ├── signals.py         # Signal definitions
+│   ├── conditions.py      # Condition definitions
+│   └── factors/           # Single-factor strategies
+├── agent/                 # LangChain trading agent
+│   ├── llm.py             # LLM client (langchain-anthropic)
+│   ├── prompts.py         # Prompt templates
+│   ├── schemas.py         # Agent decision schemas
+│   ├── commands.py        # Command definitions (AgentAction, AgentCommand)
+│   └── trader.py          # Trading agent logic
+├── execution/             # Order execution
+│   ├── models.py          # Position, Order, Account models
+│   ├── base.py            # Exchange abstract interface
+│   ├── weex/              # WEEX implementation
+│   └── manager.py         # Execution manager
+├── risk/                  # Independent risk control
+│   ├── rules.py           # Risk rules (StopLoss, TakeProfit, MaxDrawdown)
+│   ├── actions.py         # Risk actions
+│   └── monitor.py         # Risk monitor
+├── audit/                 # AI decision logging
+│   ├── models.py          # Log models (AgentLog, OrderLog)
+│   ├── writer.py          # Local file writer
+│   ├── uploaders/         # Pluggable uploaders
+│   │   ├── base.py        # Uploader interface
+│   │   └── weex.py        # WEEX API uploader
+│   └── manager.py         # Audit manager
+└── ui/                    # Textual TUI
+    ├── app.py             # Main application
+    ├── screens/           # Dashboard, Logs screens
+    └── widgets/           # Ticker, Positions, Signals widgets
+
+tests/                     # Test files
+logs/                      # Runtime logs (gitignored)
+docs/                      # Reference materials (do not import)
 ```
 
 ## Architecture
