@@ -20,6 +20,10 @@ class BinanceDataManager:
     writes updates to the DataPool.
     """
 
+    # Required intervals for signal system
+    REQUIRED_INTERVALS = ["5m", "15m", "1h", "4h"]
+    MIN_KLINES_PER_INTERVAL = 100  # Need enough for MA60 + buffer
+
     def __init__(
         self,
         data_pool: DataPool,
@@ -39,6 +43,7 @@ class BinanceDataManager:
         self._running = False
         self._symbol = ""
         self._kline_interval = "1m"
+        self._data_ready = False
 
     async def start(self, symbol: str, kline_interval: str = "1m") -> None:
         """Start data collection for a symbol.
@@ -71,24 +76,44 @@ class BinanceDataManager:
     async def initialize(self, symbol: str) -> None:
         """Initialize historical data via REST API.
 
+        Fetches klines for all required timeframes (5m, 15m, 1h, 4h)
+        to ensure signal system has sufficient data.
+
         Args:
             symbol: Trading pair
         """
         logger.info(f"Initializing historical data for {symbol}")
+        self._data_ready = False
 
         try:
             # Fetch initial ticker
             ticker = await self._rest_client.get_ticker(symbol)
             self._data_pool.update_ticker(self._ticker_to_dict(ticker))
 
-            # Fetch historical klines
-            klines = await self._rest_client.get_klines(
-                symbol, self._kline_interval, limit=100
-            )
-            kline_dicts = [self._kline_to_dict(k) for k in klines]
-            self._data_pool.update_klines(self._kline_interval, kline_dicts)
+            # Fetch historical klines for all required intervals
+            for interval in self.REQUIRED_INTERVALS:
+                klines = await self._rest_client.get_klines(
+                    symbol, interval, limit=self.MIN_KLINES_PER_INTERVAL
+                )
+                kline_dicts = [self._kline_to_dict(k) for k in klines]
+                self._data_pool.update_klines(interval, kline_dicts)
+                logger.info(f"Initialized {len(klines)} klines for {symbol} {interval}")
 
-            logger.info(f"Initialized {len(klines)} klines for {symbol}")
+            # Also fetch the streaming interval if different
+            if self._kline_interval not in self.REQUIRED_INTERVALS:
+                klines = await self._rest_client.get_klines(
+                    symbol, self._kline_interval, limit=self.MIN_KLINES_PER_INTERVAL
+                )
+                kline_dicts = [self._kline_to_dict(k) for k in klines]
+                self._data_pool.update_klines(self._kline_interval, kline_dicts)
+                logger.info(
+                    f"Initialized {len(klines)} klines for {symbol} {self._kline_interval}"
+                )
+
+            self._data_ready = True
+            logger.info(
+                f"Data initialization complete: {len(self.REQUIRED_INTERVALS)} timeframes loaded"
+            )
 
         except Exception as e:
             logger.error(f"Failed to initialize data: {e}")
@@ -144,3 +169,8 @@ class BinanceDataManager:
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
         return self._stream_client.is_connected
+
+    @property
+    def is_data_ready(self) -> bool:
+        """Check if all required historical data is loaded."""
+        return self._data_ready

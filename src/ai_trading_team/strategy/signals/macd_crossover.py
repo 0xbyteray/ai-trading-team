@@ -225,7 +225,7 @@ class MACDCrossoverSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] {timeframe.value} initialized: "
                 f"MACD={new_state.macd_value:.6f} Signal={new_state.signal_value:.6f} "
                 f"({new_state.position.value})"

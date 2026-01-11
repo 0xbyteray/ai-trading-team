@@ -104,6 +104,11 @@ class SignalAggregator:
         self._last_confluence_time: datetime | None = None
         self._confluence_cooldown = timedelta(seconds=60)
 
+        # Data readiness tracking
+        self._is_ready = False
+        self._required_kline_intervals = ["5m", "15m", "1h", "4h"]
+        self._min_klines_required = 60  # Need at least 60 klines for MA60
+
         # Initialize default signal sources
         self._init_default_sources()
 
@@ -203,6 +208,59 @@ class SignalAggregator:
                 f"  - {source.name}: timeframes={[tf.value for tf in source.timeframes]}"
             )
 
+    def _check_data_ready(self, snapshot: Any) -> bool:
+        """Check if all required data is available.
+
+        Args:
+            snapshot: Current data snapshot
+
+        Returns:
+            True if data is ready for signal processing
+        """
+        if self._is_ready:
+            return True
+
+        # Check klines for all required intervals
+        if not snapshot.klines:
+            return False
+
+        for interval in self._required_kline_intervals:
+            klines = snapshot.klines.get(interval, [])
+            if len(klines) < self._min_klines_required:
+                logger.debug(
+                    f"Data not ready: {interval} has {len(klines)} klines, "
+                    f"need {self._min_klines_required}"
+                )
+                return False
+
+        # Check ticker data
+        if not snapshot.ticker:
+            logger.debug("Data not ready: no ticker data")
+            return False
+
+        # All checks passed
+        self._is_ready = True
+        logger.info(
+            f"Signal aggregator ready: all {len(self._required_kline_intervals)} "
+            f"timeframes have sufficient data"
+        )
+        return True
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if aggregator is ready for signal processing."""
+        return self._is_ready
+
+    def set_ready(self, ready: bool = True) -> None:
+        """Manually set ready state.
+
+        Args:
+            ready: Ready state to set
+        """
+        if ready and not self._is_ready:
+            logger.info("Signal aggregator manually set to ready")
+        self._is_ready = ready
+
     def add_source(self, source: SignalSource) -> None:
         """Add a signal source.
 
@@ -239,6 +297,7 @@ class SignalAggregator:
         """Update all sources and collect new signals.
 
         This should be called when new data arrives for a timeframe.
+        Signals will not be generated until data is ready.
 
         Args:
             timeframe: Specific timeframe to update, or None for all
@@ -247,6 +306,11 @@ class SignalAggregator:
             List of new signals emitted
         """
         snapshot = self._data_pool.get_snapshot()
+
+        # Check if data is ready before processing signals
+        if not self._check_data_ready(snapshot):
+            return []
+
         signals: list[Signal] = []
 
         timeframes = [timeframe] if timeframe else list(Timeframe)
@@ -404,8 +468,10 @@ class SignalAggregator:
         return states
 
     def reset(self) -> None:
-        """Reset all source states."""
+        """Reset all source states and ready status."""
         for source in self._sources:
             source.reset()
         self._recent_signals.clear()
+        self._is_ready = False
+        self._last_confluence_time = None
         logger.info("Signal aggregator reset")

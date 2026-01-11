@@ -174,7 +174,7 @@ class LongShortRatioSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] {timeframe.value} initialized: "
                 f"L/S ratio={new_state.current_ratio:.4f}"
             )

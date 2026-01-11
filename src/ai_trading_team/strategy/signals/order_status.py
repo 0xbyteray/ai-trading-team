@@ -110,7 +110,7 @@ class OrderStatusSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] initialized: "
                 f"{new_state.order_count} open orders"
             )

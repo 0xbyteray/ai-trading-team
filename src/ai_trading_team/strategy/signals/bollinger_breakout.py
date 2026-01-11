@@ -204,7 +204,7 @@ class BollingerBreakoutSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] {timeframe.value} initialized: "
                 f"price={new_state.price:.4f} ({new_state.position.value}) "
                 f"BB=[{new_state.lower_band:.4f}, {new_state.upper_band:.4f}]"

@@ -153,7 +153,7 @@ class MACrossoverSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] {timeframe.value} initialized: "
                 f"price {new_state.position.value} MA{self._ma_period} "
                 f"({new_state.distance_percent:+.2f}%)"

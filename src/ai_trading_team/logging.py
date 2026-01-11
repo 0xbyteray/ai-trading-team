@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-LOG_DIR = Path(__file__).parent.parent.parent.parent / "logs"
+LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 

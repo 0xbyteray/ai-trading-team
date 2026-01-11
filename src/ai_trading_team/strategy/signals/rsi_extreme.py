@@ -169,7 +169,7 @@ class RSIExtremeSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] {timeframe.value} initialized: "
                 f"RSI={new_state.rsi_value:.1f} ({new_state.zone.value})"
             )

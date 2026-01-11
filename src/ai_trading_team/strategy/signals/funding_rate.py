@@ -139,7 +139,7 @@ class FundingRateSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] initialized: "
                 f"funding={new_state.funding_rate:.4f}% ({new_state.zone.value})"
             )

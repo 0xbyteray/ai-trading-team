@@ -202,11 +202,17 @@ class TradingBot:
                 return
 
         # Start data collection from Binance with multiple timeframes
+        # Note: data_manager.start() calls initialize() which fetches all required timeframes
         await self._data_manager.start(self._binance_symbol, kline_interval="1m")
-        self._logger.info(f"Started data collection for {self._binance_symbol}")
 
-        # Fetch initial data for multiple timeframes
-        await self._fetch_multi_timeframe_data()
+        # Wait for data to be ready before proceeding
+        if not self._data_manager.is_data_ready:
+            self._logger.error("Data initialization failed - cannot start signal processing")
+            return
+
+        self._logger.info(
+            f"Data ready: all timeframes loaded for {self._binance_symbol}"
+        )
 
         # Start background tasks
         asyncio.create_task(self._market_metrics_loop())
@@ -215,18 +221,6 @@ class TradingBot:
         # Main loop
         await self._run_loop()
 
-    async def _fetch_multi_timeframe_data(self) -> None:
-        """Fetch initial kline data for multiple timeframes."""
-        rest_client = self._data_manager._rest_client
-
-        for interval in ["5m", "15m", "1h", "4h"]:
-            try:
-                klines = await rest_client.get_klines(self._binance_symbol, interval, limit=100)
-                kline_dicts = [self._data_manager._kline_to_dict(k) for k in klines]
-                self._data_pool.update_klines(interval, kline_dicts)
-                self._logger.info(f"Fetched {len(klines)} {interval} klines")
-            except Exception as e:
-                self._logger.error(f"Failed to fetch {interval} klines: {e}")
 
     async def _market_metrics_loop(self) -> None:
         """Periodically fetch funding rate, long/short ratio, etc."""
@@ -286,8 +280,26 @@ class TradingBot:
         - We check for signals when DATA CHANGES, not on a fixed timer
         - Signals are only emitted when state CHANGES
         """
+        # Wait for signal aggregator to be ready before processing
+        while self._running and not self._signal_aggregator.is_ready:
+            # Let aggregator check data readiness
+            snapshot = self._data_pool.get_snapshot()
+            if snapshot.klines and snapshot.ticker:
+                # Trigger readiness check
+                self._signal_aggregator.update()
+            if self._signal_aggregator.is_ready:
+                self._logger.info("Signal aggregator ready - starting signal processing")
+                break
+            await asyncio.sleep(1)
+
+        if not self._running:
+            return
+
         # Track last kline update times to detect new data
         last_kline_counts: dict[str, int] = {}
+
+        # Initialize last_refresh with current time to prevent immediate refresh
+        current_time = asyncio.get_event_loop().time()
 
         # Refresh klines periodically for each timeframe
         timeframe_intervals = {
@@ -296,7 +308,7 @@ class TradingBot:
             "1h": 300,     # Check 1h klines every 5min
             "4h": 600,     # Check 4h klines every 10min
         }
-        last_refresh: dict[str, float] = {tf: 0 for tf in timeframe_intervals}
+        last_refresh: dict[str, float] = {tf: current_time for tf in timeframe_intervals}
 
         while self._running:
             try:

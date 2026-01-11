@@ -125,7 +125,7 @@ class PnLChangeSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
-            logger.info(
+            logger.debug(
                 f"[{self._name}] initialized: "
                 f"P&L={new_state.pnl_percent:+.2f}% (${new_state.unrealized_pnl:+.2f})"
             )
