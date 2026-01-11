@@ -87,7 +87,18 @@ class FundingRateSignal(SignalSource):
         if not funding_data:
             return None
 
-        funding_rate = float(funding_data.get("funding_rate", 0))
+        # Try different possible keys (Binance uses different formats)
+        funding_rate = funding_data.get("lastFundingRate")
+        if funding_rate is None:
+            funding_rate = funding_data.get("fundingRate")
+        if funding_rate is None:
+            funding_rate = funding_data.get("funding_rate")
+        if funding_rate is None:
+            funding_rate = funding_data.get("r")  # Some WebSocket formats
+        if funding_rate is None:
+            return None
+
+        funding_rate = float(funding_rate)
 
         # Convert to percentage if needed (some APIs return as decimal)
         if abs(funding_rate) < 0.001:  # Likely in decimal form (0.0001 = 0.01%)

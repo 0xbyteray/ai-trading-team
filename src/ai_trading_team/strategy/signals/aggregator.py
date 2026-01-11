@@ -100,6 +100,10 @@ class SignalAggregator:
         # Callbacks for new signals
         self._signal_callbacks: list[Any] = []
 
+        # Cooldown for confluence signals (prevent spam)
+        self._last_confluence_time: datetime | None = None
+        self._confluence_cooldown = timedelta(seconds=60)
+
         # Initialize default signal sources
         self._init_default_sources()
 
@@ -279,11 +283,22 @@ class SignalAggregator:
         Returns:
             Confluence signal if detected
         """
-        config = self._confluence_config
-        cutoff = datetime.now() - timedelta(seconds=config.window_seconds)
+        # Check cooldown
+        now = datetime.now()
+        if (
+            self._last_confluence_time
+            and now - self._last_confluence_time < self._confluence_cooldown
+        ):
+            return None
 
-        # Filter recent signals within window
-        recent = [s for s in self._recent_signals if s.timestamp > cutoff]
+        config = self._confluence_config
+        cutoff = now - timedelta(seconds=config.window_seconds)
+
+        # Filter recent signals within window, excluding confluence signals themselves
+        recent = [
+            s for s in self._recent_signals
+            if s.timestamp > cutoff and s.source != "aggregator"
+        ]
 
         if len(recent) < config.min_signals_for_confluence:
             return None
@@ -308,6 +323,7 @@ class SignalAggregator:
         min_score = config.min_signals_for_confluence
 
         if bullish_score >= min_score and bullish_score > bearish_score * 1.5:
+            self._last_confluence_time = now
             return Signal(
                 signal_type=SignalType.BULLISH_CONFLUENCE,
                 direction=SignalDirection.BULLISH,
@@ -327,6 +343,7 @@ class SignalAggregator:
             )
 
         elif bearish_score >= min_score and bearish_score > bullish_score * 1.5:
+            self._last_confluence_time = now
             return Signal(
                 signal_type=SignalType.BEARISH_CONFLUENCE,
                 direction=SignalDirection.BEARISH,

@@ -93,10 +93,15 @@ class MACrossoverSignal(SignalSource):
 
         # Calculate MA from klines
         closes = [float(k.get("close", 0)) for k in klines[-self._ma_period :]]
-        if not closes or 0 in closes:
+        if not closes or all(c == 0 for c in closes):
             return None
 
-        ma_value = sum(closes) / len(closes)
+        # Filter out any zero values for MA calculation
+        valid_closes = [c for c in closes if c > 0]
+        if len(valid_closes) < self._ma_period // 2:  # Need at least half the period
+            return None
+
+        ma_value = sum(valid_closes) / len(valid_closes)
 
         # Get current price
         ticker = snapshot.ticker
