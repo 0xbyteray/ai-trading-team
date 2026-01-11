@@ -44,3 +44,5 @@ docs 目录下的内容都是拿来阅读和参考的，千万不要直接使用
 
 对于 langchain，我们使用 langchain-anthropic 来构建 agent，并且我设置了第三方的 api 地址，https://api.minimax.io/anthropic，请基于我的配置来构建调用，不要使用 anthropic 官方的 api 地址。
 
+在每次发送给 agent 进行判断的 context 中，需要把最近的 10 次操作记录也一并发送给 agent，以便于 agent 进行分析和判断。
+
