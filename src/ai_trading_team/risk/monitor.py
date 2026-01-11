@@ -1,9 +1,22 @@
 """Risk control monitor."""
 
+from typing import Any, Protocol
+
 from ai_trading_team.core.data_pool import DataPool
-from ai_trading_team.execution.base import Exchange
 from ai_trading_team.risk.actions import RiskAction
 from ai_trading_team.risk.rules import RiskRule
+
+
+class ExchangeProtocol(Protocol):
+    """Protocol for exchange interface used by RiskMonitor."""
+
+    async def get_account(self) -> Any:
+        """Get account information."""
+        ...
+
+    async def get_positions(self) -> list[Any]:
+        """Get all open positions."""
+        ...
 
 
 class RiskMonitor:
@@ -15,7 +28,7 @@ class RiskMonitor:
     def __init__(
         self,
         data_pool: DataPool,
-        exchange: Exchange,
+        exchange: ExchangeProtocol,
     ) -> None:
         self._data_pool = data_pool
         self._exchange = exchange
@@ -40,6 +53,16 @@ class RiskMonitor:
         """Disable risk monitoring."""
         self._enabled = False
 
+    def reset_rules(self) -> None:
+        """Reset all stateful risk rules.
+
+        Called when a position is closed to reset tracking state
+        for rules like DynamicTakeProfitRule and TrailingStopRule.
+        """
+        for rule in self._rules:
+            if hasattr(rule, "reset"):
+                rule.reset()
+
     async def evaluate(self) -> RiskAction | None:
         """Evaluate all risk rules.
 
@@ -58,15 +81,20 @@ class RiskMonitor:
             if not rule.enabled:
                 continue
 
+            # Only evaluate with position for position-dependent rules
             for position in positions:
                 action = rule.evaluate(snapshot, position, account)
                 if action:
                     return action
 
-            # Also check rules that don't require a position
-            action = rule.evaluate(snapshot, None, account)
-            if action:
-                return action
+        # Only check with None if no positions exist (for non-position rules)
+        if not positions:
+            for rule in self._rules:
+                if not rule.enabled:
+                    continue
+                action = rule.evaluate(snapshot, None, account)
+                if action:
+                    return action
 
         return None
 

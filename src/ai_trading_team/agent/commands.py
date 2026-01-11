@@ -15,6 +15,7 @@ class AgentAction(str, Enum):
     REDUCE = "reduce"  # Reduce existing position
     CANCEL = "cancel"  # Cancel pending order
     OBSERVE = "observe"  # Do nothing, just observe
+    MOVE_STOP_LOSS = "move_stop_loss"  # Move stop loss order
 
 
 @dataclass
@@ -28,6 +29,7 @@ class AgentCommand:
     size: float | None = None
     price: float | None = None
     order_type: OrderType | None = None
+    stop_loss_price: float | None = None  # Stop loss price for MOVE_STOP_LOSS action
 
     def is_actionable(self) -> bool:
         """Check if command requires execution."""
@@ -49,6 +51,12 @@ class AgentCommand:
 
         if self.action == AgentAction.CLOSE and self.side is None:
             errors.append("side is required for close action")
+
+        if (
+            self.action == AgentAction.MOVE_STOP_LOSS
+            and (self.stop_loss_price is None or self.stop_loss_price <= 0)
+        ):
+            errors.append("stop_loss_price is required for move_stop_loss action")
 
         if self.order_type == OrderType.LIMIT and self.price is None:
             errors.append("price is required for limit orders")

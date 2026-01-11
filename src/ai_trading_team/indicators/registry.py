@@ -1,8 +1,6 @@
 """Indicator registry for managing active indicators."""
 
-from typing import Any
-
-from ai_trading_team.indicators.base import Indicator
+from ai_trading_team.indicators.base import Indicator, OHLCVData
 
 
 class IndicatorRegistry:
@@ -31,7 +29,7 @@ class IndicatorRegistry:
         """Get an indicator by name."""
         return self._indicators.get(name)
 
-    def update_all(self, data: dict[str, Any]) -> dict[str, Any]:
+    def update_all(self, data: OHLCVData) -> dict[str, float | dict[str, float] | None]:
         """Update all registered indicators.
 
         Args:
@@ -40,12 +38,12 @@ class IndicatorRegistry:
         Returns:
             Dict of indicator name -> value
         """
-        results = {}
+        results: dict[str, float | dict[str, float] | None] = {}
         for name, indicator in self._indicators.items():
             results[name] = indicator.update(data)
         return results
 
-    def get_all_values(self) -> dict[str, Any]:
+    def get_all_values(self) -> dict[str, float | dict[str, float] | None]:
         """Get current values of all indicators."""
         return {name: ind.value for name, ind in self._indicators.items()}
 

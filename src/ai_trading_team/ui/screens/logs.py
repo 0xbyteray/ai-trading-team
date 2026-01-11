@@ -5,7 +5,7 @@ from textual.screen import Screen
 from textual.widgets import Log, Static
 
 
-class LogsScreen(Screen):
+class LogsScreen(Screen[None]):
     """Log viewer screen."""
 
     CSS = """

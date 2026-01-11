@@ -1,9 +1,11 @@
 """LLM client configuration for langchain-anthropic."""
 
+from typing import Any
+
 from ai_trading_team.config import Config
 
 
-def create_llm(config: Config):  # type: ignore[no-untyped-def]
+def create_llm(config: Config) -> Any:
     """Create LangChain LLM client.
 
     Args:
@@ -17,10 +19,13 @@ def create_llm(config: Config):  # type: ignore[no-untyped-def]
     """
     # Lazy import to avoid loading langchain when not needed
     from langchain_anthropic import ChatAnthropic
+    from pydantic import SecretStr
 
     return ChatAnthropic(
-        model="claude-sonnet-4-20250514",
-        anthropic_api_key=config.api.anthropic_api_key,
-        anthropic_api_url=config.api.anthropic_base_url,
-        max_tokens=4096,
+        model_name="MiniMax-M2.1",
+        api_key=SecretStr(config.api.anthropic_api_key),
+        base_url=config.api.anthropic_base_url,
+        max_tokens_to_sample=4096,
+        timeout=None,
+        stop=None,
     )

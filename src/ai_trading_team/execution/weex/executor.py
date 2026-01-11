@@ -18,6 +18,10 @@ class WEEXExecutor:
 
     Combines REST API and WebSocket for order execution
     and real-time data synchronization.
+
+    Note: This class implements the Exchange interface but does not formally
+    inherit from it due to signature differences. The RiskMonitor accepts
+    this class via duck typing.
     """
 
     def __init__(
@@ -184,16 +188,16 @@ class WEEXExecutor:
         client_oid = f"mvp_{uuid.uuid4().hex[:16]}"
 
         # Map to WEEX order type codes
-        # type: 1=开多, 2=开空, 3=平多, 4=平空
+        # Type codes: 1=open long, 2=open short, 3=close long, 4=close short
         if action == "open":
             type_code = "1" if side == Side.LONG else "2"
         else:
             type_code = "3" if side == Side.LONG else "4"
 
-        # order_type: 0=普通订单, 1=只挂单, 2=全部成交或取消, 3=立即成交取消剩余
+        # Order type: 0=normal, 1=post only, 2=FOK, 3=IOC
         weex_order_type = "0"
 
-        # match_price: 0=限价, 1=市价
+        # match_price: 0=limit, 1=market
         match_price = "1" if order_type == OrderType.MARKET else "0"
 
         order_params: dict[str, Any] = {

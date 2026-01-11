@@ -95,16 +95,16 @@ class IndicatorCondition(Condition):
 
         match self.operator:
             case ConditionOperator.GT:
-                return value > self.threshold
+                return bool(value > self.threshold)
             case ConditionOperator.GTE:
-                return value >= self.threshold
+                return bool(value >= self.threshold)
             case ConditionOperator.LT:
-                return value < self.threshold
+                return bool(value < self.threshold)
             case ConditionOperator.LTE:
-                return value <= self.threshold
+                return bool(value <= self.threshold)
             case ConditionOperator.EQ:
-                return value == self.threshold
+                return bool(value == self.threshold)
             case ConditionOperator.NEQ:
-                return value != self.threshold
+                return bool(value != self.threshold)
             case _:
                 return False

@@ -10,7 +10,7 @@ from ai_trading_team.ui.widgets.signals import SignalsWidget
 from ai_trading_team.ui.widgets.ticker import TickerWidget
 
 
-class DashboardScreen(Screen):
+class DashboardScreen(Screen[None]):
     """Main trading dashboard screen."""
 
     CSS = """

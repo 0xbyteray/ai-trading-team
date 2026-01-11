@@ -1,35 +1,71 @@
-"""AI Trading Team - Entry point for MVP.
+"""AI Trading Team - Entry point with event-driven signal system.
 
-This is a minimal viable product that:
-1. Fetches market data from Binance (BTCUSDT)
-2. Runs MA crossover strategy to generate signals
-3. Uses LangChain agent to make trading decisions
-4. Executes trades on WEEX (cmt_btcusdt)
+This trading bot:
+1. Fetches market data from Binance (configured via TRADING_SYMBOL)
+2. Uses EVENT-DRIVEN signals (only on state changes, not periodic evaluation)
+3. Uses LangChain agent to make trading decisions when signals trigger
+4. Executes trades on WEEX (or MockExecutor in DRY_RUN mode)
+5. Implements comprehensive risk control (25% force stop, 10% profit signals)
+
+Signal System:
+- MA Crossover: Price crosses above/below MA (triggers on crossover only)
+- RSI Extremes: RSI enters/exits overbought/oversold zones
+- Funding Rate: Significant funding rate shifts
+- Long/Short Ratio: Significant ratio changes
+
+Signals are NOT periodic - they only fire when state CHANGES.
 """
 
 import asyncio
 import contextlib
 import logging
 import signal
+from datetime import datetime
+from decimal import Decimal
 
 from ai_trading_team.agent.commands import AgentAction
+from ai_trading_team.agent.schemas import AgentDecision
 from ai_trading_team.agent.trader import LangChainTradingAgent
 from ai_trading_team.config import Config
 from ai_trading_team.core.data_pool import DataPool
-from ai_trading_team.core.signal_queue import SignalQueue
 from ai_trading_team.core.types import OrderType
 from ai_trading_team.data.manager import BinanceDataManager
+from ai_trading_team.execution.mock_executor import MockExecutor
 from ai_trading_team.execution.weex.executor import WEEXExecutor
 from ai_trading_team.logging import setup_logging
-from ai_trading_team.strategy.factors.ma_crossover import MACrossoverStrategy
+from ai_trading_team.risk.monitor import RiskMonitor
+from ai_trading_team.risk.rules import DynamicTakeProfitRule, ForceStopLossRule, TrailingStopRule
+from ai_trading_team.strategy.signals import (
+    Signal,
+    SignalAggregator,
+    SignalDirection,
+    Timeframe,
+)
+from ai_trading_team.strategy.state_machine import (
+    PositionContext,
+    StateTransition,
+    StrategyStateMachine,
+)
 
-# Trading pair mappings
-BINANCE_SYMBOL = "BTCUSDT"  # Binance uses uppercase
-WEEX_SYMBOL = "cmt_btcusdt"  # WEEX competition symbol
+
+def get_symbol_pair(symbol: str) -> tuple[str, str]:
+    """Convert trading symbol to exchange-specific formats.
+
+    Args:
+        symbol: Base symbol (e.g., "DOGEUSDT", "BTCUSDT")
+
+    Returns:
+        Tuple of (binance_symbol, weex_symbol)
+        - Binance: uppercase (e.g., "DOGEUSDT")
+        - WEEX: cmt_ prefix + lowercase (e.g., "cmt_dogeusdt")
+    """
+    binance_symbol = symbol.upper()
+    weex_symbol = f"cmt_{symbol.lower()}"
+    return binance_symbol, weex_symbol
 
 
 class TradingBot:
-    """Main trading bot orchestrator."""
+    """Main trading bot with event-driven signal system."""
 
     def __init__(self, config: Config) -> None:
         """Initialize trading bot.
@@ -41,79 +77,313 @@ class TradingBot:
         self._logger = logging.getLogger(__name__)
         self._running = False
 
+        # Convert trading symbol to exchange-specific formats
+        self._binance_symbol, self._weex_symbol = get_symbol_pair(config.trading.symbol)
+
         # Core components
         self._data_pool = DataPool()
-        self._signal_queue = SignalQueue()
 
-        # Modules
+        # Data module - Binance for market data
         self._data_manager = BinanceDataManager(
             self._data_pool,
             config.api.binance_api_key,
             config.api.binance_api_secret,
         )
-        self._strategy = MACrossoverStrategy(
-            self._data_pool,
-            self._signal_queue,
-            short_period=7,
-            long_period=25,
-            ma_type="ema",
-            kline_interval="1m",
+
+        # Event-driven signal aggregator (replaces old orchestrator)
+        self._signal_aggregator = SignalAggregator(
+            data_pool=self._data_pool,
+            symbol=self._weex_symbol,
         )
-        self._agent = LangChainTradingAgent(config, WEEX_SYMBOL)
-        self._executor = WEEXExecutor(
-            config.api.weex_api_key,
-            config.api.weex_api_secret,
-            config.api.weex_passphrase,
+
+        # State machine for trading lifecycle
+        self._state_machine = StrategyStateMachine(
+            symbol=self._weex_symbol,
+            cooldown_seconds=60,
+            force_stop_loss_percent=Decimal("25"),
+            profit_signal_threshold=Decimal("10"),
         )
+
+        # Agent for trading decisions
+        self._agent = LangChainTradingAgent(config, self._weex_symbol)
+
+        # Execution - use MockExecutor in DRY_RUN mode
+        self._executor: MockExecutor | WEEXExecutor
+        if config.trading.dry_run:
+            self._executor = MockExecutor(
+                data_pool=self._data_pool,
+                initial_balance=Decimal("1000"),
+                leverage=config.trading.leverage,
+            )
+        else:
+            self._executor = WEEXExecutor(
+                config.api.weex_api_key,
+                config.api.weex_api_secret,
+                config.api.weex_passphrase,
+            )
+
+        # Risk monitor with strategy-specific rules
+        self._risk_monitor = RiskMonitor(self._data_pool, self._executor)
+        self._setup_risk_rules()
+
+        # Pending signals to process
+        self._pending_signals: list[Signal] = []
+
+    def _setup_risk_rules(self) -> None:
+        """Configure risk control rules per STRATEGY.md."""
+        # Force stop-loss at 25% margin loss - no agent needed
+        self._risk_monitor.add_rule(
+            ForceStopLossRule(
+                name="force_stop_loss_25",
+                force_stop_loss_percent=Decimal("25.0"),
+                priority=100,
+            )
+        )
+
+        # Dynamic take-profit signals at 10% increments - agent decides
+        self._risk_monitor.add_rule(
+            DynamicTakeProfitRule(
+                name="dynamic_take_profit_10",
+                profit_threshold_percent=Decimal("10.0"),
+                priority=50,
+            )
+        )
+
+        # Trailing stop for profit protection
+        self._risk_monitor.add_rule(
+            TrailingStopRule(
+                name="trailing_stop",
+                activation_profit_percent=Decimal("15.0"),
+                trail_distance_percent=Decimal("7.0"),
+                priority=80,
+            )
+        )
+
+        self._logger.info("Risk rules configured: 25% force stop, 10% profit signals, trailing stop")
 
     async def start(self) -> None:
         """Start the trading bot."""
-        self._logger.info("Starting trading bot...")
+        self._logger.info("=" * 60)
+        self._logger.info("AI Trading Team - Event-Driven Signal System")
+        self._logger.info("=" * 60)
+        self._logger.info(f"Binance Symbol: {self._binance_symbol}")
+        self._logger.info(f"WEEX Symbol: {self._weex_symbol}")
+        self._logger.info(f"Leverage: {self._config.trading.leverage}x")
+        self._logger.info("Signal System: Event-driven (state changes only)")
+        self._logger.info("Signals: MA Crossover, RSI Extremes, Funding Rate, L/S Ratio")
+
+        if self._config.trading.dry_run:
+            self._logger.info("Mode: DRY_RUN (simulated trading, $1000 initial balance)")
+        else:
+            self._logger.info("Mode: LIVE (real trading on WEEX)")
+
+        self._logger.info("=" * 60)
+
         self._running = True
 
-        # Connect to WEEX
+        # Connect to executor
         try:
             await self._executor.connect()
-            self._logger.info("Connected to WEEX")
+            if self._config.trading.dry_run:
+                self._logger.info("Mock executor connected")
+            else:
+                self._logger.info("Connected to WEEX")
 
             # Set leverage
-            await self._executor.set_leverage(WEEX_SYMBOL, self._config.trading.leverage)
+            await self._executor.set_leverage(self._weex_symbol, self._config.trading.leverage)
+            self._logger.info(f"Leverage set to {self._config.trading.leverage}x")
 
         except Exception as e:
-            self._logger.error(f"Failed to connect to WEEX: {e}")
-            self._logger.warning("Continuing without WEEX connection (dry run mode)")
+            if self._config.trading.dry_run:
+                self._logger.error(f"Failed to initialize mock executor: {e}")
+                return
+            else:
+                self._logger.error(f"Failed to connect to WEEX: {e}")
+                return
 
-        # Start data collection from Binance
-        await self._data_manager.start(BINANCE_SYMBOL, kline_interval="1m")
-        self._logger.info(f"Started data collection for {BINANCE_SYMBOL}")
+        # Start data collection from Binance with multiple timeframes
+        await self._data_manager.start(self._binance_symbol, kline_interval="1m")
+        self._logger.info(f"Started data collection for {self._binance_symbol}")
+
+        # Fetch initial data for multiple timeframes
+        await self._fetch_multi_timeframe_data()
+
+        # Start background tasks
+        asyncio.create_task(self._market_metrics_loop())
+        asyncio.create_task(self._signal_update_loop())
 
         # Main loop
         await self._run_loop()
 
-    async def _run_loop(self) -> None:
-        """Main trading loop."""
-        strategy_check_interval = 5  # Check strategy every 5 seconds
-        last_check = 0
+    async def _fetch_multi_timeframe_data(self) -> None:
+        """Fetch initial kline data for multiple timeframes."""
+        rest_client = self._data_manager._rest_client
+
+        for interval in ["5m", "15m", "1h", "4h"]:
+            try:
+                klines = await rest_client.get_klines(self._binance_symbol, interval, limit=100)
+                kline_dicts = [self._data_manager._kline_to_dict(k) for k in klines]
+                self._data_pool.update_klines(interval, kline_dicts)
+                self._logger.info(f"Fetched {len(klines)} {interval} klines")
+            except Exception as e:
+                self._logger.error(f"Failed to fetch {interval} klines: {e}")
+
+    async def _market_metrics_loop(self) -> None:
+        """Periodically fetch funding rate, long/short ratio, etc."""
+        while self._running:
+            try:
+                rest_client = self._data_manager._rest_client
+
+                # Fetch funding rate
+                try:
+                    funding = await rest_client.get_funding_rate(self._binance_symbol)
+                    self._data_pool.update_funding_rate({
+                        "funding_rate": float(funding.funding_rate),
+                        "funding_time": funding.funding_time.isoformat() if funding.funding_time else None,
+                    })
+                except Exception as e:
+                    self._logger.debug(f"Failed to fetch funding rate: {e}")
+
+                # Fetch long/short ratio
+                try:
+                    ls_ratio = await rest_client.get_long_short_ratio(self._binance_symbol)
+                    self._data_pool.update_long_short_ratio({
+                        "long_ratio": float(ls_ratio.long_ratio),
+                        "short_ratio": float(ls_ratio.short_ratio),
+                        "long_short_ratio": float(ls_ratio.long_short_ratio),
+                        "timestamp": ls_ratio.timestamp.isoformat(),
+                    })
+                except Exception as e:
+                    self._logger.debug(f"Failed to fetch L/S ratio: {e}")
+
+                # Fetch open interest
+                try:
+                    oi = await rest_client.get_open_interest(self._binance_symbol)
+                    self._data_pool.update_open_interest({
+                        "open_interest": float(oi.open_interest),
+                        "timestamp": oi.timestamp.isoformat(),
+                    })
+                except Exception as e:
+                    self._logger.debug(f"Failed to fetch OI: {e}")
+
+                # Fetch mark price
+                try:
+                    mark = await rest_client.get_mark_price(self._binance_symbol)
+                    self._data_pool.update_mark_price(mark)
+                except Exception as e:
+                    self._logger.debug(f"Failed to fetch mark price: {e}")
+
+            except Exception as e:
+                self._logger.error(f"Error in market metrics loop: {e}")
+
+            # Fetch every 30 seconds
+            await asyncio.sleep(30)
+
+    async def _signal_update_loop(self) -> None:
+        """Update signal sources when new data arrives.
+
+        This is the key difference from the old system:
+        - We check for signals when DATA CHANGES, not on a fixed timer
+        - Signals are only emitted when state CHANGES
+        """
+        # Track last kline update times to detect new data
+        last_kline_counts: dict[str, int] = {}
+
+        # Refresh klines periodically for each timeframe
+        timeframe_intervals = {
+            "5m": 60,      # Check 5m klines every 60s
+            "15m": 120,    # Check 15m klines every 2min
+            "1h": 300,     # Check 1h klines every 5min
+            "4h": 600,     # Check 4h klines every 10min
+        }
+        last_refresh: dict[str, float] = {tf: 0 for tf in timeframe_intervals}
 
         while self._running:
             try:
                 current_time = asyncio.get_event_loop().time()
 
-                # Periodically check strategy conditions
-                if current_time - last_check >= strategy_check_interval:
-                    last_check = current_time
+                # Refresh klines for each timeframe based on interval
+                for interval, refresh_interval in timeframe_intervals.items():
+                    if current_time - last_refresh[interval] >= refresh_interval:
+                        last_refresh[interval] = current_time
+                        await self._refresh_klines(interval)
 
-                    # Evaluate strategy
-                    signal = self._strategy.evaluate()
-                    if signal:
-                        self._logger.info(
-                            f"Signal generated: {signal.signal_type.value}"
-                        )
+                        # Update signals for this timeframe
+                        timeframe = self._interval_to_timeframe(interval)
+                        if timeframe:
+                            signals = self._signal_aggregator.update(timeframe)
+                            if signals:
+                                self._pending_signals.extend(signals)
 
-                # Process any signals in the queue
-                signal = self._signal_queue.pop()
-                if signal:
+                # Also check for signals when 1m data updates (from WebSocket)
+                snapshot = self._data_pool.get_snapshot()
+                if snapshot.klines:
+                    klines_1m = snapshot.klines.get("1m", [])
+                    current_count = len(klines_1m)
+                    if current_count != last_kline_counts.get("1m", 0):
+                        last_kline_counts["1m"] = current_count
+                        # Update all signal sources with latest data
+                        signals = self._signal_aggregator.update()
+                        if signals:
+                            self._pending_signals.extend(signals)
+
+            except Exception as e:
+                self._logger.error(f"Error in signal update loop: {e}")
+
+            await asyncio.sleep(5)  # Check every 5 seconds
+
+    async def _refresh_klines(self, interval: str) -> None:
+        """Refresh klines for a specific interval.
+
+        Args:
+            interval: Kline interval (5m, 15m, 1h, 4h)
+        """
+        try:
+            rest_client = self._data_manager._rest_client
+            klines = await rest_client.get_klines(self._binance_symbol, interval, limit=100)
+            kline_dicts = [self._data_manager._kline_to_dict(k) for k in klines]
+            self._data_pool.update_klines(interval, kline_dicts)
+        except Exception as e:
+            self._logger.debug(f"Failed to refresh {interval} klines: {e}")
+
+    def _interval_to_timeframe(self, interval: str) -> Timeframe | None:
+        """Convert interval string to Timeframe enum.
+
+        Args:
+            interval: Interval string (5m, 15m, 1h, 4h)
+
+        Returns:
+            Timeframe enum or None
+        """
+        mapping = {
+            "5m": Timeframe.M5,
+            "15m": Timeframe.M15,
+            "1h": Timeframe.H1,
+            "4h": Timeframe.H4,
+        }
+        return mapping.get(interval)
+
+    async def _run_loop(self) -> None:
+        """Main trading loop."""
+        risk_check_interval = 1.0  # Check risk every 1 second
+        last_risk_check = 0.0
+
+        while self._running:
+            try:
+                current_time = asyncio.get_event_loop().time()
+
+                # Check risk rules (highest priority, most frequent)
+                if current_time - last_risk_check >= risk_check_interval:
+                    last_risk_check = current_time
+                    await self._check_risk()
+
+                # Process pending signals (event-driven, not periodic)
+                if self._pending_signals:
+                    signal = self._pending_signals.pop(0)
                     await self._process_signal(signal)
+
+                # Update position data periodically
+                await self._update_position_data()
 
                 await asyncio.sleep(0.1)
 
@@ -123,51 +393,165 @@ class TradingBot:
                 self._logger.error(f"Error in main loop: {e}")
                 await asyncio.sleep(1)
 
-    async def _process_signal(self, signal) -> None:  # type: ignore[no-untyped-def]
-        """Process a strategy signal through the agent.
-
-        Args:
-            signal: Strategy signal to process
-        """
-        self._logger.info(f"Processing signal: {signal.signal_type.value}")
-
-        # Get market snapshot
-        snapshot = self._data_pool.get_snapshot()
-
-        # Get current position from WEEX
+    async def _update_position_data(self) -> None:
+        """Update position data in data pool."""
         try:
-            position = await self._executor.get_position(WEEX_SYMBOL)
+            position = await self._executor.get_position(self._weex_symbol)
             if position:
-                snapshot.position = {
+                self._data_pool.update_position({
                     "symbol": position.symbol,
                     "side": position.side.value,
                     "size": float(position.size),
                     "entry_price": float(position.entry_price),
                     "unrealized_pnl": float(position.unrealized_pnl),
-                }
+                    "margin": float(position.margin),
+                    "leverage": position.leverage,
+                })
+            else:
+                self._data_pool.update_position(None)
 
-            # Get account info
             account = await self._executor.get_account()
-            snapshot.account = {
+            self._data_pool.update_account({
                 "balance": float(account.total_equity),
                 "available": float(account.available_balance),
                 "margin": float(account.used_margin),
-            }
+            })
+        except Exception as e:
+            self._logger.debug(f"Error updating position data: {e}")
+
+    async def _check_risk(self) -> None:
+        """Check risk rules and execute if triggered."""
+        if not self._state_machine.has_position:
+            return
+
+        try:
+            action = await self._risk_monitor.evaluate()
+            if action:
+                self._logger.warning(f"Risk action triggered: {action.reason}")
+
+                # Force close for high-priority risk actions
+                if action.priority >= 80:
+                    self._logger.critical(f"FORCE CLOSING POSITION: {action.reason}")
+
+                    position = await self._executor.get_position(self._weex_symbol)
+                    if position:
+                        order = await self._executor.close_position(
+                            symbol=self._weex_symbol,
+                            side=position.side,
+                            size=None,
+                        )
+                        if order:
+                            self._logger.info(f"Force closed position: {order.order_id}")
+
+                            self._data_pool.add_operation({
+                                "timestamp": datetime.now().isoformat(),
+                                "action": "force_close",
+                                "side": position.side.value,
+                                "size": float(position.size),
+                                "result": "success",
+                                "reason": action.reason,
+                            })
+
+                            self._state_machine.transition(StateTransition.POSITION_CLOSED)
+                            self._risk_monitor.reset_rules()
 
         except Exception as e:
-            self._logger.warning(f"Failed to get WEEX data: {e}")
+            self._logger.error(f"Error checking risk: {e}")
 
-        # Get agent decision
-        decision = await self._agent.process_signal(signal, snapshot)
-        self._logger.info(
-            f"Agent decision: {decision.command.action.value} - {decision.command.reason[:100]}"
+    async def _process_signal(self, signal: Signal) -> None:
+        """Process a trading signal through the agent.
+
+        Args:
+            signal: Signal to process
+        """
+        # Only process actionable signals
+        if not signal.is_actionable:
+            self._logger.debug(f"Signal not actionable: {signal.signal_type.value}")
+            return
+
+        # Only process entry signals when IDLE
+        if not self._state_machine.is_idle:
+            self._logger.debug(f"Not idle, skipping signal: {signal.signal_type.value}")
+            return
+
+        self._logger.info(f"🤖 Processing signal: {signal.signal_type.value}")
+        self._logger.info(f"🤖 {signal.description}")
+        self._logger.info("🤖 Calling AI agent for trading decision...")
+
+        # Transition to analyzing state
+        self._state_machine.transition(
+            StateTransition.ENTRY_SIGNAL,
+            {"signal_type": signal.signal_type.value},
         )
 
-        # Execute the decision
-        if decision.command.is_actionable():
-            await self._execute_command(decision)
+        # Get market snapshot
+        snapshot = self._data_pool.get_snapshot()
 
-        # Upload AI log to WEEX
+        # Convert Signal to StrategySignal format for agent
+        from ai_trading_team.core.signal_queue import (
+            SignalType as OldSignalType,
+        )
+        from ai_trading_team.core.signal_queue import (
+            StrategySignal,
+        )
+
+        # Map new signal direction to old signal type
+        if signal.direction == SignalDirection.BULLISH:
+            old_signal_type = OldSignalType.STRONG_BULLISH
+        elif signal.direction == SignalDirection.BEARISH:
+            old_signal_type = OldSignalType.STRONG_BEARISH
+        else:
+            old_signal_type = OldSignalType.CONFLICTING_SIGNALS
+
+        strategy_signal = StrategySignal(
+            signal_type=old_signal_type,
+            data={
+                "new_signal_type": signal.signal_type.value,
+                "direction": signal.direction.value,
+                "strength": signal.strength.value,
+                "timeframe": signal.timeframe.value,
+                "source": signal.source,
+                "description": signal.description,
+                **signal.data,
+            },
+            priority=2 if signal.strength.value == "moderate" else 3,
+        )
+
+        # Get agent decision
+        decision = await self._agent.process_signal(strategy_signal, snapshot)
+        self._logger.info(
+            f"🤖 Agent decision: {decision.command.action.value} - {decision.command.reason[:100]}"
+        )
+
+        # Handle agent decision
+        if decision.command.action == AgentAction.OBSERVE:
+            self._state_machine.transition(StateTransition.AGENT_OBSERVE)
+        elif decision.command.action in (AgentAction.OPEN, AgentAction.ADD):
+            if decision.command.is_actionable():
+                success = await self._execute_command(decision)
+                if success:
+                    position = await self._executor.get_position(self._weex_symbol)
+                    if position:
+                        pos_ctx = PositionContext(
+                            symbol=self._weex_symbol,
+                            side=position.side,
+                            margin=position.margin,
+                        )
+                        self._state_machine.transition(
+                            StateTransition.AGENT_OPEN,
+                            {"position": pos_ctx},
+                        )
+                else:
+                    self._state_machine.transition(StateTransition.ORDER_FAILED)
+            else:
+                self._state_machine.transition(StateTransition.AGENT_OBSERVE)
+        elif decision.command.action == AgentAction.CLOSE:
+            success = await self._execute_command(decision)
+            if success:
+                self._state_machine.transition(StateTransition.POSITION_CLOSED)
+                self._risk_monitor.reset_rules()
+
+        # Upload AI log
         try:
             await self._executor.upload_ai_log(
                 stage="Signal Processing",
@@ -187,20 +571,28 @@ class TradingBot:
         except Exception as e:
             self._logger.warning(f"Failed to upload AI log: {e}")
 
-    async def _execute_command(self, decision) -> None:  # type: ignore[no-untyped-def]
+    async def _execute_command(self, decision: AgentDecision) -> bool:
         """Execute agent command.
 
         Args:
             decision: Agent decision with command to execute
+
+        Returns:
+            True if execution succeeded
         """
         command = decision.command
         self._logger.info(f"Executing command: {command.action.value}")
+
+        errors = command.validate()
+        if errors:
+            self._logger.error(f"Command validation failed: {errors}")
+            return False
 
         try:
             if command.action == AgentAction.OPEN:
                 if command.side and command.size:
                     order = await self._executor.place_order(
-                        symbol=WEEX_SYMBOL,
+                        symbol=self._weex_symbol,
                         side=command.side,
                         order_type=command.order_type or OrderType.MARKET,
                         size=command.size,
@@ -209,56 +601,74 @@ class TradingBot:
                     )
                     self._logger.info(f"Opened position: {order.order_id}")
 
-            elif command.action == AgentAction.CLOSE:
-                if command.side:
-                    order = await self._executor.close_position(
-                        symbol=WEEX_SYMBOL,
-                        side=command.side,
-                        size=command.size,
-                    )
-                    if order:
-                        self._logger.info(f"Closed position: {order.order_id}")
+                    self._data_pool.add_operation({
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "open",
+                        "side": command.side.value,
+                        "size": command.size,
+                        "result": "success",
+                        "order_id": order.order_id,
+                    })
+                    return True
 
-            elif command.action == AgentAction.ADD:
-                if command.side and command.size:
-                    order = await self._executor.place_order(
-                        symbol=WEEX_SYMBOL,
-                        side=command.side,
-                        order_type=command.order_type or OrderType.MARKET,
-                        size=command.size,
-                        price=command.price,
-                        action="open",
-                    )
-                    self._logger.info(f"Added to position: {order.order_id}")
+            elif command.action == AgentAction.CLOSE and command.side:
+                close_order = await self._executor.close_position(
+                    symbol=self._weex_symbol,
+                    side=command.side,
+                    size=command.size,
+                )
+                if close_order:
+                    self._logger.info(f"Closed position: {close_order.order_id}")
 
-            elif command.action == AgentAction.REDUCE:
-                if command.side and command.size:
-                    order = await self._executor.place_order(
-                        symbol=WEEX_SYMBOL,
-                        side=command.side,
-                        order_type=command.order_type or OrderType.MARKET,
-                        size=command.size,
-                        price=command.price,
-                        action="close",
-                    )
-                    self._logger.info(f"Reduced position: {order.order_id}")
-
-            elif command.action == AgentAction.CANCEL:
-                count = await self._executor.cancel_all_orders(WEEX_SYMBOL)
-                self._logger.info(f"Cancelled {count} orders")
+                    self._data_pool.add_operation({
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "close",
+                        "side": command.side.value,
+                        "size": command.size,
+                        "result": "success",
+                        "order_id": close_order.order_id,
+                    })
+                    return True
 
         except Exception as e:
             self._logger.error(f"Failed to execute command: {e}")
+
+            self._data_pool.add_operation({
+                "timestamp": datetime.now().isoformat(),
+                "action": command.action.value,
+                "side": command.side.value if command.side else None,
+                "size": command.size,
+                "result": "failed",
+                "error": str(e),
+            })
+
+        return False
 
     async def stop(self) -> None:
         """Stop the trading bot."""
         self._logger.info("Stopping trading bot...")
         self._running = False
 
+        # Display simulation summary in DRY_RUN mode
+        if self._config.trading.dry_run and isinstance(self._executor, MockExecutor):
+            summary = self._executor.get_summary()
+            self._logger.info("=" * 60)
+            self._logger.info("DRY_RUN Simulation Summary")
+            self._logger.info("=" * 60)
+            self._logger.info(f"Initial Balance: ${summary['initial_balance']:.2f}")
+            self._logger.info(f"Current Balance: ${summary['current_balance']:.2f}")
+            self._logger.info(f"Current Equity: ${summary['current_equity']:.2f}")
+            self._logger.info(f"Realized P&L: ${summary['realized_pnl']:+.2f}")
+            self._logger.info(f"Unrealized P&L: ${summary['unrealized_pnl']:+.2f}")
+            self._logger.info(f"Total P&L: ${summary['total_pnl']:+.2f}")
+            self._logger.info(f"Total Orders: {summary['total_orders']}")
+            self._logger.info(f"Has Open Position: {summary['has_position']}")
+            self._logger.info("=" * 60)
+
         # Stop data collection
         await self._data_manager.stop()
 
-        # Disconnect from WEEX
+        # Disconnect from executor
         await self._executor.disconnect()
 
         self._logger.info("Trading bot stopped")
@@ -268,15 +678,6 @@ async def main_async() -> None:
     """Async main entry point."""
     logger = setup_logging()
     config = Config.from_env()
-
-    logger.info("=" * 50)
-    logger.info("AI Trading Team MVP")
-    logger.info("=" * 50)
-    logger.info(f"Binance Symbol: {BINANCE_SYMBOL}")
-    logger.info(f"WEEX Symbol: {WEEX_SYMBOL}")
-    logger.info(f"Leverage: {config.trading.leverage}x")
-    logger.info("Strategy: MA Crossover (EMA 7/25)")
-    logger.info("=" * 50)
 
     bot = TradingBot(config)
 

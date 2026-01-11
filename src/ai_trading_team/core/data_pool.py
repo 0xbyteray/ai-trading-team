@@ -22,6 +22,16 @@ class DataSnapshot:
     orders: list[dict[str, Any]] | None = None
     account: dict[str, Any] | None = None
 
+    # Extended market data
+    funding_rate: dict[str, Any] | None = None
+    long_short_ratio: dict[str, Any] | None = None
+    open_interest: dict[str, Any] | None = None
+    mark_price: dict[str, Any] | None = None
+    liquidations: list[dict[str, Any]] | None = None
+
+    # Recent operation history for agent context
+    recent_operations: list[dict[str, Any]] | None = None
+
 
 class DataPool:
     """Thread-safe real-time data storage.
@@ -40,6 +50,17 @@ class DataPool:
         self._orders: list[dict[str, Any]] = []
         self._account: dict[str, Any] | None = None
         self._subscribers: list[Callable[[EventType, Any], None]] = []
+
+        # Extended market data
+        self._funding_rate: dict[str, Any] | None = None
+        self._long_short_ratio: dict[str, Any] | None = None
+        self._open_interest: dict[str, Any] | None = None
+        self._mark_price: dict[str, Any] | None = None
+        self._liquidations: list[dict[str, Any]] = []
+
+        # Recent operation history (last 10)
+        self._recent_operations: list[dict[str, Any]] = []
+        self._max_operations_history = 10
 
     def subscribe(self, callback: Callable[[EventType, Any], None]) -> None:
         """Subscribe to data updates.
@@ -103,6 +124,49 @@ class DataPool:
         with self._lock:
             self._account = account
 
+    def update_funding_rate(self, funding_rate: dict[str, Any]) -> None:
+        """Update funding rate data."""
+        with self._lock:
+            self._funding_rate = funding_rate
+        self._notify(EventType.FUNDING_RATE_UPDATE, funding_rate)
+
+    def update_long_short_ratio(self, ratio: dict[str, Any]) -> None:
+        """Update long/short ratio data."""
+        with self._lock:
+            self._long_short_ratio = ratio
+
+    def update_open_interest(self, oi: dict[str, Any]) -> None:
+        """Update open interest data."""
+        with self._lock:
+            self._open_interest = oi
+
+    def update_mark_price(self, mark_price: dict[str, Any]) -> None:
+        """Update mark price data."""
+        with self._lock:
+            self._mark_price = mark_price
+        self._notify(EventType.MARK_PRICE_UPDATE, mark_price)
+
+    def add_liquidation(self, liquidation: dict[str, Any]) -> None:
+        """Add a liquidation event."""
+        with self._lock:
+            self._liquidations.append(liquidation)
+            # Keep only last 100 liquidations
+            if len(self._liquidations) > 100:
+                self._liquidations = self._liquidations[-100:]
+        self._notify(EventType.LIQUIDATION_UPDATE, liquidation)
+
+    def add_operation(self, operation: dict[str, Any]) -> None:
+        """Add an operation to history.
+
+        Args:
+            operation: Operation record with timestamp, action, result, etc.
+        """
+        with self._lock:
+            self._recent_operations.append(operation)
+            # Keep only last N operations
+            if len(self._recent_operations) > self._max_operations_history:
+                self._recent_operations = self._recent_operations[-self._max_operations_history:]
+
     def get_snapshot(self) -> DataSnapshot:
         """Get a point-in-time snapshot of all data."""
         with self._lock:
@@ -115,6 +179,12 @@ class DataPool:
                 position=self._position.copy() if self._position else None,
                 orders=list(self._orders),
                 account=self._account.copy() if self._account else None,
+                funding_rate=self._funding_rate.copy() if self._funding_rate else None,
+                long_short_ratio=self._long_short_ratio.copy() if self._long_short_ratio else None,
+                open_interest=self._open_interest.copy() if self._open_interest else None,
+                mark_price=self._mark_price.copy() if self._mark_price else None,
+                liquidations=list(self._liquidations) if self._liquidations else None,
+                recent_operations=list(self._recent_operations),
             )
 
     @property

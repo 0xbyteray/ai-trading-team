@@ -3,6 +3,7 @@
 import logging
 from dataclasses import asdict
 from decimal import Decimal
+from typing import Any
 
 from ai_trading_team.core.data_pool import DataPool
 from ai_trading_team.data.binance.rest import BinanceRestClient
@@ -117,7 +118,7 @@ class BinanceDataManager:
         self._data_pool.update_klines(interval, existing)
 
     @staticmethod
-    def _ticker_to_dict(ticker: Ticker) -> dict:
+    def _ticker_to_dict(ticker: Ticker) -> dict[str, Any]:
         """Convert Ticker to dict with serializable values."""
         result = asdict(ticker)
         for key, value in result.items():
@@ -126,7 +127,7 @@ class BinanceDataManager:
         return result
 
     @staticmethod
-    def _kline_to_dict(kline: Kline) -> dict:
+    def _kline_to_dict(kline: Kline) -> dict[str, Any]:
         """Convert Kline to dict with serializable values."""
         result = asdict(kline)
         for key, value in result.items():

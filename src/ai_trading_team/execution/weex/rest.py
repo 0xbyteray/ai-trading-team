@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 
 from ai_trading_team.core.types import OrderType, Side, TimeInForce
+from ai_trading_team.execution.models import Account, Order, Position
 
 
 class WEEXRestClient(ABC):
@@ -13,12 +14,12 @@ class WEEXRestClient(ABC):
     """
 
     @abstractmethod
-    async def get_account_info(self) -> dict:
+    async def get_account_info(self) -> Account:
         """Get account information."""
         ...
 
     @abstractmethod
-    async def get_positions(self, symbol: str | None = None) -> list[dict]:
+    async def get_positions(self, symbol: str | None = None) -> list[Position]:
         """Get positions."""
         ...
 
@@ -32,7 +33,7 @@ class WEEXRestClient(ABC):
         price: Decimal | None = None,
         time_in_force: TimeInForce = TimeInForce.GTC,
         client_order_id: str | None = None,
-    ) -> dict:
+    ) -> Order:
         """Place an order."""
         ...
 
@@ -42,7 +43,7 @@ class WEEXRestClient(ABC):
         ...
 
     @abstractmethod
-    async def get_open_orders(self, symbol: str) -> list[dict]:
+    async def get_open_orders(self, symbol: str) -> list[Order]:
         """Get open orders."""
         ...
 

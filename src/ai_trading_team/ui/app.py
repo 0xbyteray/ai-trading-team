@@ -6,7 +6,7 @@ from textual.widgets import Footer, Header
 from ai_trading_team.ui.screens.dashboard import DashboardScreen
 
 
-class TradingApp(App):
+class TradingApp(App[None]):
     """AI Trading Team TUI Application."""
 
     TITLE = "AI Trading Team"
@@ -35,7 +35,7 @@ class TradingApp(App):
         """Called when app is mounted."""
         self.push_screen("dashboard")
 
-    def action_switch_screen(self, screen_name: str) -> None:
+    async def action_switch_screen(self, screen_name: str) -> None:
         """Switch to a different screen."""
         if screen_name in self.SCREENS:
             self.switch_screen(screen_name)

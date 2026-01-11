@@ -1,7 +1,35 @@
 """WEEX platform log uploader."""
 
+from typing import Any, TypedDict
+
 from ai_trading_team.audit.models import AgentLog
 from ai_trading_team.audit.uploaders.base import LogUploader
+
+
+class _WEEXLogInput(TypedDict):
+    """WEEX log input format."""
+
+    signal: str
+    market_data: dict[str, Any]
+    indicators: dict[str, Any]
+
+
+class _WEEXLogOutput(TypedDict):
+    """WEEX log output format."""
+
+    action: str
+    command: dict[str, Any]
+
+
+class WEEXLogFormat(TypedDict):
+    """WEEX AI competition log format."""
+
+    timestamp: str
+    ai_input: _WEEXLogInput
+    ai_output: _WEEXLogOutput
+    ai_explanation: str
+    model: str
+    latency_ms: float
 
 
 class WEEXLogUploader(LogUploader):
@@ -48,21 +76,20 @@ class WEEXLogUploader(LogUploader):
         # TODO: Implement API health check
         return True
 
-    def _format_log_for_weex(self, log: AgentLog) -> dict:
+    def _format_log_for_weex(self, log: AgentLog) -> WEEXLogFormat:
         """Format log according to WEEX AI competition specification."""
-        # TODO: Map AgentLog fields to WEEX required format
-        return {
-            "timestamp": log.timestamp.isoformat(),
-            "ai_input": {
-                "signal": log.signal_type,
-                "market_data": log.market_data,
-                "indicators": log.indicators,
-            },
-            "ai_output": {
-                "action": log.action,
-                "command": log.command,
-            },
-            "ai_explanation": log.reason,
-            "model": log.model,
-            "latency_ms": log.latency_ms,
-        }
+        return WEEXLogFormat(
+            timestamp=log.timestamp.isoformat(),
+            ai_input=_WEEXLogInput(
+                signal=log.signal_type,
+                market_data=log.market_data,
+                indicators=log.indicators,
+            ),
+            ai_output=_WEEXLogOutput(
+                action=log.action,
+                command=log.command,
+            ),
+            ai_explanation=log.reason,
+            model=log.model,
+            latency_ms=log.latency_ms,
+        )

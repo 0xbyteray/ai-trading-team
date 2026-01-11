@@ -23,8 +23,10 @@ def setup_logging(
     Returns:
         Root logger for the application
     """
+    # Disable propagation to root logger to avoid duplicate logs
     logger = logging.getLogger("ai_trading_team")
     logger.setLevel(level)
+    logger.propagate = False
 
     if logger.handlers:
         return logger
@@ -41,6 +43,12 @@ def setup_logging(
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+
+    # Suppress duplicate logs from third-party libraries using our logger
+    # by setting root logger to WARNING
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        root_logger.setLevel(logging.WARNING)
 
     return logger
 

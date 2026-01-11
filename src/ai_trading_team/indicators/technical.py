@@ -1,11 +1,20 @@
 """Technical indicators using talipp library."""
 
-from typing import Any
+from typing import Protocol, runtime_checkable
 
-from ai_trading_team.indicators.base import Indicator
+from ai_trading_team.indicators.base import Indicator, OHLCVData
 
 # Note: Actual talipp imports will be added when implementing
 # from talipp.indicators import RSI, MACD, BB, etc.
+
+
+@runtime_checkable
+class _TalippIndicator(Protocol):
+    """Protocol for talipp indicator interface."""
+
+    def add(self, value: float) -> None: ...
+    def __getitem__(self, index: int) -> float | None: ...
+    def __bool__(self) -> bool: ...
 
 
 class RSIIndicator(Indicator):
@@ -14,14 +23,20 @@ class RSIIndicator(Indicator):
     def __init__(self, period: int = 14) -> None:
         super().__init__(f"RSI_{period}", period=period)
         self._period = period
-        self._indicator: Any = None  # Will be talipp.indicators.RSI
+        self._indicator: _TalippIndicator | None = None
 
-    def update(self, data: dict[str, Any]) -> float | None:
+    def update(self, data: OHLCVData) -> float | None:
         """Update RSI with new close price."""
-        # Implementation will use talipp RSI
+        # TODO: Implementation will use talipp RSI
         # self._indicator.add(data["close"])
         # self._value = self._indicator[-1] if self._indicator else None
-        return self._value
+        _ = data  # Placeholder until implemented
+        value = self._value
+        if value is None:
+            return None
+        if isinstance(value, int | float):
+            return float(value)
+        return None
 
     def reset(self) -> None:
         """Reset RSI state."""
@@ -44,15 +59,22 @@ class MACDIndicator(Indicator):
             slow_period=slow_period,
             signal_period=signal_period,
         )
-        self._indicator: Any = None  # Will be talipp.indicators.MACD
+        self._indicator: _TalippIndicator | None = None
 
-    def update(self, data: dict[str, Any]) -> dict[str, float] | None:
+    def update(self, data: OHLCVData) -> dict[str, float] | None:
         """Update MACD with new close price.
 
         Returns dict with 'macd', 'signal', 'histogram' keys.
         """
-        # Implementation will use talipp MACD
-        return self._value
+        # TODO: Implementation will use talipp MACD
+        _ = data  # Placeholder until implemented
+        value = self._value
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            # Ensure all values are float
+            return {k: float(v) for k, v in value.items()}
+        return None
 
     def reset(self) -> None:
         """Reset MACD state."""
@@ -65,15 +87,22 @@ class BollingerBandsIndicator(Indicator):
 
     def __init__(self, period: int = 20, std_dev: float = 2.0) -> None:
         super().__init__(f"BB_{period}_{std_dev}", period=period, std_dev=std_dev)
-        self._indicator: Any = None  # Will be talipp.indicators.BB
+        self._indicator: _TalippIndicator | None = None
 
-    def update(self, data: dict[str, Any]) -> dict[str, float] | None:
+    def update(self, data: OHLCVData) -> dict[str, float] | None:
         """Update BB with new close price.
 
         Returns dict with 'upper', 'middle', 'lower' keys.
         """
-        # Implementation will use talipp BB
-        return self._value
+        # TODO: Implementation will use talipp BB
+        _ = data  # Placeholder until implemented
+        value = self._value
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            # Ensure all values are float
+            return {k: float(v) for k, v in value.items()}
+        return None
 
     def reset(self) -> None:
         """Reset BB state."""
@@ -86,12 +115,18 @@ class ATRIndicator(Indicator):
 
     def __init__(self, period: int = 14) -> None:
         super().__init__(f"ATR_{period}", period=period)
-        self._indicator: Any = None  # Will be talipp.indicators.ATR
+        self._indicator: _TalippIndicator | None = None
 
-    def update(self, data: dict[str, Any]) -> float | None:
+    def update(self, data: OHLCVData) -> float | None:
         """Update ATR with new OHLC data."""
-        # Implementation will use talipp ATR
-        return self._value
+        # TODO: Implementation will use talipp ATR
+        _ = data  # Placeholder until implemented
+        value = self._value
+        if value is None:
+            return None
+        if isinstance(value, int | float):
+            return float(value)
+        return None
 
     def reset(self) -> None:
         """Reset ATR state."""

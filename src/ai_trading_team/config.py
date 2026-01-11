@@ -25,10 +25,9 @@ class TradingConfig:
     """Trading parameters configuration."""
 
     symbol: str = "BTCUSDT"
-    leverage: int = 10
-    max_position_size: float = 1000.0  # USDT
-    stop_loss_percent: float = 2.0
-    take_profit_percent: float = 4.0
+    leverage: int = 75  # Default 75x leverage
+    max_position_percent: float = 75.0  # Max 75% of available balance for positions
+    dry_run: bool = False  # Simulate trades without real execution
 
 
 @dataclass
@@ -65,10 +64,9 @@ class Config:
 
         trading = TradingConfig(
             symbol=os.getenv("TRADING_SYMBOL", "BTCUSDT"),
-            leverage=int(os.getenv("TRADING_LEVERAGE", "10")),
-            max_position_size=float(os.getenv("TRADING_MAX_POSITION", "1000.0")),
-            stop_loss_percent=float(os.getenv("TRADING_STOP_LOSS", "2.0")),
-            take_profit_percent=float(os.getenv("TRADING_TAKE_PROFIT", "4.0")),
+            leverage=int(os.getenv("TRADING_LEVERAGE", "75")),
+            max_position_percent=float(os.getenv("TRADING_MAX_POSITION_PERCENT", "75.0")),
+            dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         )
 
         return cls(api=api, trading=trading)

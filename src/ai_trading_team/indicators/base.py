@@ -1,7 +1,17 @@
 """Base indicator class."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TypedDict
+
+
+class OHLCVData(TypedDict, total=False):
+    """OHLCV market data for indicator calculation."""
+
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
 
 
 class Indicator(ABC):
@@ -10,10 +20,10 @@ class Indicator(ABC):
     Wraps talipp indicators with a unified interface.
     """
 
-    def __init__(self, name: str, **params: Any) -> None:
+    def __init__(self, name: str, **params: int | float | str) -> None:
         self._name = name
         self._params = params
-        self._value: Any = None
+        self._value: float | dict[str, float] | None = None
 
     @property
     def name(self) -> str:
@@ -21,17 +31,17 @@ class Indicator(ABC):
         return self._name
 
     @property
-    def params(self) -> dict[str, Any]:
+    def params(self) -> dict[str, int | float | str]:
         """Indicator parameters."""
         return self._params
 
     @property
-    def value(self) -> Any:
+    def value(self) -> float | dict[str, float] | None:
         """Current indicator value."""
         return self._value
 
     @abstractmethod
-    def update(self, data: dict[str, Any]) -> Any:
+    def update(self, data: OHLCVData) -> float | dict[str, float] | None:
         """Update indicator with new data.
 
         Args:

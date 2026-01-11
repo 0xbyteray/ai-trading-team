@@ -35,7 +35,9 @@ class SignalsWidget(Static):
 
         # Keep only last 20 signals
         while table.row_count > 20:
-            table.remove_row(table.get_row_at(0))
+            # Get the first row key from the rows dict
+            first_row_key = next(iter(table.rows.keys()))
+            table.remove_row(first_row_key)
 
     def clear_signals(self) -> None:
         """Clear all signals."""

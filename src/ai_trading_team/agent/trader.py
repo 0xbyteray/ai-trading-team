@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ai_trading_team.agent.commands import AgentAction, AgentCommand
-from ai_trading_team.agent.prompts import DECISION_PROMPT, SYSTEM_PROMPT
+from ai_trading_team.agent.prompts import DECISION_PROMPT, PROFIT_SIGNAL_PROMPT, SYSTEM_PROMPT
 from ai_trading_team.agent.schemas import AgentDecision
 from ai_trading_team.config import Config
 from ai_trading_team.core.data_pool import DataSnapshot
@@ -40,12 +40,15 @@ class LangChainTradingAgent:
     def _create_llm(self) -> Any:
         """Create LangChain LLM client."""
         from langchain_anthropic import ChatAnthropic
+        from pydantic import SecretStr
 
         return ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            anthropic_api_key=self._config.api.anthropic_api_key,
-            anthropic_api_url=self._config.api.anthropic_base_url,
-            max_tokens=2048,
+            model_name="MiniMax-M2.1",
+            api_key=SecretStr(self._config.api.anthropic_api_key),
+            base_url=self._config.api.anthropic_base_url,
+            max_tokens_to_sample=2048,
+            timeout=None,
+            stop=None,
         )
 
     async def process_signal(
@@ -97,7 +100,7 @@ class LangChainTradingAgent:
                 market_snapshot=self._snapshot_to_dict(snapshot),
                 command=command,
                 timestamp=datetime.now(),
-                model="claude-sonnet-4-20250514",
+                model="MiniMax-M2.1",
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
@@ -124,7 +127,7 @@ class LangChainTradingAgent:
                     reason=f"Agent error: {e}. Observing for safety.",
                 ),
                 timestamp=datetime.now(),
-                model="claude-sonnet-4-20250514",
+                model="MiniMax-M2.1",
                 latency_ms=latency_ms,
             )
 
@@ -186,6 +189,7 @@ class LangChainTradingAgent:
             size=float(data["size"]) if data.get("size") else None,
             price=float(data["price"]) if data.get("price") else None,
             order_type=order_type,
+            stop_loss_price=float(data["stop_loss_price"]) if data.get("stop_loss_price") else None,
             reason=data.get("reason", "No reason provided"),
         )
 
@@ -223,8 +227,8 @@ class LangChainTradingAgent:
                     klines_str = f"Interval: {interval}\n"
                     for k in last_5:
                         klines_str += (
-                            f"  O:{k.get('open'):.2f} H:{k.get('high'):.2f} "
-                            f"L:{k.get('low'):.2f} C:{k.get('close'):.2f}\n"
+                            f"  O:{k.get('open', 0):.4f} H:{k.get('high', 0):.4f} "
+                            f"L:{k.get('low', 0):.4f} C:{k.get('close', 0):.4f}\n"
                         )
                     break
 
@@ -243,6 +247,21 @@ class LangChainTradingAgent:
                 f"{k}: {v}" for k, v in snapshot.indicators.items()
             )
 
+        # Format funding rate
+        funding_str = "N/A"
+        if snapshot.funding_rate:
+            fr = snapshot.funding_rate
+            rate = fr.get("funding_rate", 0)
+            funding_str = f"Rate: {float(rate) * 100:.4f}%"
+
+        # Format long/short ratio
+        ls_ratio_str = "N/A"
+        if snapshot.long_short_ratio:
+            ls = snapshot.long_short_ratio
+            long_r = ls.get("long_ratio", 0.5)
+            short_r = ls.get("short_ratio", 0.5)
+            ls_ratio_str = f"Long: {float(long_r) * 100:.1f}%, Short: {float(short_r) * 100:.1f}%"
+
         # Format position
         position_str = "无持仓"
         if snapshot.position:
@@ -252,7 +271,8 @@ class LangChainTradingAgent:
                 f"Side: {pos.get('side')}, "
                 f"Size: {pos.get('size')}, "
                 f"Entry: {pos.get('entry_price')}, "
-                f"PnL: {pos.get('unrealized_pnl')}"
+                f"PnL: {pos.get('unrealized_pnl')}, "
+                f"Margin: {pos.get('margin')}"
             )
 
         # Format orders
@@ -264,26 +284,66 @@ class LangChainTradingAgent:
                 for o in snapshot.orders
             )
 
-        # Format account
+        # Format account with trading config
         account_str = "N/A"
         if snapshot.account:
             acc = snapshot.account
+            available = acc.get('available', 0)
+            max_margin = available * self._config.trading.max_position_percent / 100
             account_str = (
                 f"Balance: {acc.get('balance')} USDT, "
-                f"Available: {acc.get('available')} USDT, "
-                f"Margin: {acc.get('margin')} USDT"
+                f"Available: {available} USDT, "
+                f"Used Margin: {acc.get('margin')} USDT\n"
+                f"Leverage: {self._config.trading.leverage}x, "
+                f"Max Position Percent: {self._config.trading.max_position_percent}%, "
+                f"Max Usable Margin: {max_margin:.2f} USDT"
             )
+
+        # Format recent operations (last 10)
+        ops_str = "无历史操作记录"
+        if snapshot.recent_operations:
+            ops_lines = []
+            for op in snapshot.recent_operations[-10:]:
+                ops_lines.append(
+                    f"[{op.get('timestamp', 'N/A')}] "
+                    f"{op.get('action', 'N/A')} {op.get('side', '')} "
+                    f"Size:{op.get('size', 'N/A')} "
+                    f"Result:{op.get('result', 'N/A')}"
+                )
+            ops_str = "\n".join(ops_lines) if ops_lines else ops_str
+
+        # Extract signal data for multi-factor analysis
+        signal_data = signal.data
+        factor_analysis = "N/A"
+        if "factor_analysis" in signal_data:
+            factor_lines = []
+            for fa in signal_data.get("factor_analysis", []):
+                factor_lines.append(
+                    f"- {fa.get('factor', 'N/A')}: "
+                    f"score={fa.get('score', 0):.2f}, "
+                    f"weight={fa.get('weight', 0):.2f}"
+                )
+            factor_analysis = "\n".join(factor_lines) if factor_lines else "N/A"
 
         return {
             "signal_type": signal.signal_type.value,
             "signal_data": json.dumps(signal.data, default=str),
+            "signal_strength": signal_data.get("strength", "unknown"),
+            "suggested_side": signal_data.get("suggested_side", "N/A"),
+            "composite_score": signal_data.get("composite_score", "N/A"),
+            "market_bias": signal_data.get("market_bias", "neutral"),
+            "volatility_ok": signal_data.get("volatility_ok", True),
+            "factor_analysis": factor_analysis,
             "ticker": ticker_str,
             "klines": klines_str,
             "orderbook": orderbook_str,
             "indicators": indicators_str,
+            "funding_rate": funding_str,
+            "long_short_ratio": ls_ratio_str,
             "position": position_str,
             "orders": orders_str,
             "account": account_str,
+            "recent_operations": ops_str,
         }
 
     def _snapshot_to_dict(self, snapshot: DataSnapshot) -> dict[str, Any]:
@@ -296,3 +356,122 @@ class LangChainTradingAgent:
             "position": snapshot.position,
             "orders_count": len(snapshot.orders or []),
         }
+
+    async def process_profit_signal(
+        self,
+        snapshot: DataSnapshot,
+        profit_data: dict[str, Any],
+    ) -> AgentDecision:
+        """Process a profit threshold signal and decide stop loss price.
+
+        Args:
+            snapshot: Current market data snapshot
+            profit_data: Profit signal data containing threshold info
+
+        Returns:
+            Agent decision with stop loss command
+        """
+        start_time = time.time()
+
+        # Format position info
+        position_str = "无持仓"
+        if snapshot.position:
+            pos = snapshot.position
+            position_str = (
+                f"Symbol: {pos.get('symbol')}, "
+                f"Side: {pos.get('side')}, "
+                f"Size: {pos.get('size')}, "
+                f"Entry: {pos.get('entry_price')}, "
+                f"PnL: {pos.get('unrealized_pnl')}, "
+                f"Margin: {pos.get('margin')}"
+            )
+
+        # Format market summary
+        market_summary = "N/A"
+        if snapshot.ticker:
+            ticker = snapshot.ticker
+            market_summary = (
+                f"Current Price: {ticker.get('last_price', 'N/A')}, "
+                f"24h Change: {ticker.get('price_change_percent', 'N/A')}%"
+            )
+
+        # Format indicators
+        indicators_str = "N/A"
+        if snapshot.indicators:
+            indicators_str = "\n".join(
+                f"{k}: {v}" for k, v in snapshot.indicators.items()
+            )
+
+        # Build context for profit signal prompt
+        context = {
+            "position": position_str,
+            "current_pnl_percent": profit_data.get("current_pnl_percent", 0),
+            "threshold_level": profit_data.get("threshold_level", 10),
+            "highest_pnl_percent": profit_data.get("highest_pnl_percent", 0),
+            "position_side": profit_data.get("position_side", "unknown"),
+            "entry_price": profit_data.get("entry_price", 0),
+            "market_summary": market_summary,
+            "indicators": indicators_str,
+            "symbol": self._symbol,
+        }
+
+        # Create messages
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=PROFIT_SIGNAL_PROMPT.format(**context)),
+        ]
+
+        try:
+            # Invoke the LLM
+            response = await self._llm.ainvoke(messages)
+            raw_response = response.content
+
+            # Parse the response
+            command = self.parse_response(str(raw_response))
+
+            # Calculate latency
+            latency_ms = (time.time() - start_time) * 1000
+
+            # Get token usage if available
+            prompt_tokens = 0
+            completion_tokens = 0
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                prompt_tokens = response.usage_metadata.get("input_tokens", 0)
+                completion_tokens = response.usage_metadata.get("output_tokens", 0)
+
+            decision = AgentDecision(
+                signal_type="profit_threshold",
+                signal_data=profit_data,
+                market_snapshot=self._snapshot_to_dict(snapshot),
+                command=command,
+                timestamp=datetime.now(),
+                model="MiniMax-M2.1",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+            )
+
+            logger.info(
+                f"Profit signal decision: action={command.action.value}, "
+                f"stop_loss_price={command.stop_loss_price}, "
+                f"reason={command.reason[:50]}..."
+            )
+
+            return decision
+
+        except Exception as e:
+            logger.error(f"Profit signal processing error: {e}")
+            latency_ms = (time.time() - start_time) * 1000
+            return AgentDecision(
+                signal_type="profit_threshold",
+                signal_data=profit_data,
+                market_snapshot=self._snapshot_to_dict(snapshot),
+                command=AgentCommand(
+                    action=AgentAction.OBSERVE,
+                    symbol=self._symbol,
+                    reason=f"Agent error: {e}. Observing for safety.",
+                ),
+                timestamp=datetime.now(),
+                model="MiniMax-M2.1",
+                latency_ms=latency_ms,
+            )
