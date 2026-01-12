@@ -165,12 +165,14 @@ class StrategyStateMachine:
                 (StateTransition.PROFIT_THRESHOLD, StrategyState.PROFIT_SIGNAL),
                 (StateTransition.RISK_TRIGGERED, StrategyState.RISK_OVERRIDE),
                 (StateTransition.AGENT_CLOSE, StrategyState.WAITING_EXIT),
+                (StateTransition.POSITION_CLOSED, StrategyState.COOLDOWN),
             ],
             StrategyState.PROFIT_SIGNAL: [
                 (StateTransition.AGENT_CLOSE, StrategyState.WAITING_EXIT),
                 (StateTransition.AGENT_HOLD, StrategyState.IN_POSITION),
                 (StateTransition.RISK_TRIGGERED, StrategyState.RISK_OVERRIDE),
                 (StateTransition.TIMEOUT, StrategyState.IN_POSITION),
+                (StateTransition.POSITION_CLOSED, StrategyState.COOLDOWN),
             ],
             StrategyState.WAITING_EXIT: [
                 (StateTransition.POSITION_CLOSED, StrategyState.COOLDOWN),
