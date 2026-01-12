@@ -200,6 +200,8 @@ class TradingBot:
         self._ws_position_ttl = 12.0
         self._ws_account_ttl = 12.0
         self._ws_orders_ttl = 8.0
+        self._last_backlog_log = 0.0
+        self._backlog_log_interval = 30.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -956,6 +958,14 @@ class TradingBot:
                         if timeframe:
                             signals = self._signal_aggregator.update(timeframe)
                             if signals:
+                                for signal in signals:
+                                    self._logger.info(
+                                        "Signal queued: %s %s %s %s",
+                                        signal.signal_type.value,
+                                        signal.timeframe.value,
+                                        signal.strength.value,
+                                        signal.direction.value,
+                                    )
                                 self._pending_signals.extend(signals)
 
                 # Also check for signals when 1m data updates (from WebSocket)
@@ -968,6 +978,14 @@ class TradingBot:
                         # Update all signal sources with latest data
                         signals = self._signal_aggregator.update()
                         if signals:
+                            for signal in signals:
+                                self._logger.info(
+                                    "Signal queued: %s %s %s %s",
+                                    signal.signal_type.value,
+                                    signal.timeframe.value,
+                                    signal.strength.value,
+                                    signal.direction.value,
+                                )
                             self._pending_signals.extend(signals)
 
                         # Update indicators in data pool for AI context
@@ -1035,6 +1053,12 @@ class TradingBot:
                 if self._pending_signals and self._signal_task is None:
                     signal = self._pending_signals.pop(0)
                     self._signal_task = asyncio.create_task(self._process_signal(signal))
+                elif self._pending_signals and self._signal_task is not None:
+                    if current_time - self._last_backlog_log >= self._backlog_log_interval:
+                        self._logger.info(
+                            "AI busy; %d signals pending", len(self._pending_signals)
+                        )
+                        self._last_backlog_log = current_time
 
                 # Update position data periodically
                 await self._update_position_data()
@@ -1492,7 +1516,11 @@ class TradingBot:
             # Only process actionable signals
             if not signal.is_actionable:
                 self._logger.info(
-                    f"Signal not actionable; AI not invoked: {signal.signal_type.value}"
+                    "Signal not actionable; AI not invoked: %s %s %s %s",
+                    signal.signal_type.value,
+                    signal.timeframe.value,
+                    signal.strength.value,
+                    signal.direction.value,
                 )
                 self._notify_agent_log(
                     "SKIP",
@@ -1511,8 +1539,12 @@ class TradingBot:
             else:
                 # Other states (ANALYZING, WAITING_ENTRY, etc.): skip
                 self._logger.info(
-                    f"Busy state ({self._state_machine.state.value}); "
-                    f"AI not invoked for signal {signal.signal_type.value}"
+                    "Busy state (%s); AI not invoked for signal %s %s %s %s",
+                    self._state_machine.state.value,
+                    signal.signal_type.value,
+                    signal.timeframe.value,
+                    signal.strength.value,
+                    signal.direction.value,
                 )
                 self._notify_agent_log(
                     "SKIP",
@@ -1536,7 +1568,11 @@ class TradingBot:
         position = await self._executor.get_position(self._execution_symbol)
         if not position:
             self._logger.info(
-                f"No position found; skipping signal {signal.signal_type.value}"
+                "No position found; skipping signal %s %s %s %s",
+                signal.signal_type.value,
+                signal.timeframe.value,
+                signal.strength.value,
+                signal.direction.value,
             )
             return
 
@@ -1552,19 +1588,33 @@ class TradingBot:
         # Only process strong opposite signals (weak signals are noise)
         if not is_opposite_signal:
             self._logger.info(
-                f"Same-direction signal while in position; skipping AI: {signal.signal_type.value}"
+                "Same-direction signal; skipping AI: %s %s %s %s",
+                signal.signal_type.value,
+                signal.timeframe.value,
+                signal.strength.value,
+                signal.direction.value,
             )
             return
 
         if signal.strength == SignalStrength.WEAK:
             self._logger.info(
-                f"Weak opposite signal; skipping AI: {signal.signal_type.value}"
+                "Weak opposite signal; skipping AI: %s %s %s %s",
+                signal.signal_type.value,
+                signal.timeframe.value,
+                signal.strength.value,
+                signal.direction.value,
             )
             return
 
         # Check debounce to avoid repeated signals
         if self._state_machine.should_debounce_signal(signal.signal_type.value):
-            self._logger.info(f"Signal debounced; skipping AI: {signal.signal_type.value}")
+            self._logger.info(
+                "Signal debounced; skipping AI: %s %s %s %s",
+                signal.signal_type.value,
+                signal.timeframe.value,
+                signal.strength.value,
+                signal.direction.value,
+            )
             return
 
         self._logger.info(
