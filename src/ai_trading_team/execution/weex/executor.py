@@ -168,6 +168,8 @@ class WEEXExecutor:
         size: float,
         price: float | None = None,
         action: str = "open",  # open/close
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
     ) -> Order:
         """Place a new order.
 
@@ -178,6 +180,8 @@ class WEEXExecutor:
             size: Order size
             price: Limit price (required for LIMIT orders)
             action: "open" for opening position, "close" for closing
+            stop_loss_price: Preset stop loss price (for open orders)
+            take_profit_price: Preset take profit price (for open orders)
 
         Returns:
             Created Order object
@@ -211,6 +215,15 @@ class WEEXExecutor:
 
         if order_type == OrderType.LIMIT and price is not None:
             order_params["price"] = str(price)
+
+        # Add preset stop loss if provided (for opening positions)
+        if action == "open" and stop_loss_price is not None:
+            order_params["preset_stop_loss_price"] = str(stop_loss_price)
+            logger.info(f"Setting preset stop loss at {stop_loss_price}")
+
+        # Add preset take profit if provided
+        if action == "open" and take_profit_price is not None:
+            order_params["preset_take_profit_price"] = str(take_profit_price)
 
         logger.info(f"Placing order: {order_params}")
 
@@ -311,6 +324,73 @@ class WEEXExecutor:
             )
         except Exception as e:
             logger.error(f"Failed to close position: {e}")
+            return None
+
+    async def reduce_position(self, symbol: str, side: Side, size: float) -> Order | None:
+        """Partially close a position.
+
+        Args:
+            symbol: Trading pair
+            side: Position side to reduce
+            size: Size to close (must be positive)
+
+        Returns:
+            Order object if successful
+        """
+        if size <= 0:
+            logger.error(f"Invalid reduce size: {size}")
+            return None
+
+        try:
+            # Use place_order with action="close" for partial close
+            order = await self.place_order(
+                symbol=symbol,
+                side=side,
+                order_type=OrderType.MARKET,
+                size=size,
+                action="close",
+            )
+            logger.info(f"Reduced position by {size}: {order.order_id}")
+            return order
+        except Exception as e:
+            logger.error(f"Failed to reduce position: {e}")
+            return None
+
+    async def add_to_position(
+        self,
+        symbol: str,
+        side: Side,
+        size: float,
+        stop_loss_price: float | None = None,
+    ) -> Order | None:
+        """Add to an existing position.
+
+        Args:
+            symbol: Trading pair
+            side: Position side to add to
+            size: Size to add
+            stop_loss_price: Optional stop loss price
+
+        Returns:
+            Order object if successful
+        """
+        if size <= 0:
+            logger.error(f"Invalid add size: {size}")
+            return None
+
+        try:
+            order = await self.place_order(
+                symbol=symbol,
+                side=side,
+                order_type=OrderType.MARKET,
+                size=size,
+                action="open",
+                stop_loss_price=stop_loss_price,
+            )
+            logger.info(f"Added {size} to position: {order.order_id}")
+            return order
+        except Exception as e:
+            logger.error(f"Failed to add to position: {e}")
             return None
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:

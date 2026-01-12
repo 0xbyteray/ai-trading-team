@@ -149,12 +149,31 @@ class MockExecutor:
         size: float,
         price: float | None = None,
         action: str = "open",
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
     ) -> Order:
         """Place a simulated order.
 
         For market orders, executes immediately.
         For limit orders, adds to pending orders.
+
+        Args:
+            symbol: Trading pair
+            side: Order side
+            order_type: Order type
+            size: Order size
+            price: Limit price
+            action: "open" or "close"
+            stop_loss_price: Preset stop loss price (logged in mock mode)
+            take_profit_price: Preset take profit price (logged in mock mode)
         """
+        # Log stop loss/take profit for debugging in mock mode
+        if action == "open":
+            if stop_loss_price is not None:
+                logger.info(f"[MOCK] Preset stop loss: {stop_loss_price}")
+            if take_profit_price is not None:
+                logger.info(f"[MOCK] Preset take profit: {take_profit_price}")
+
         client_oid = f"mock_{uuid.uuid4().hex[:16]}"
         order_id = f"mock_order_{uuid.uuid4().hex[:8]}"
 
@@ -183,9 +202,7 @@ class MockExecutor:
 
         return order
 
-    async def _execute_order(
-        self, order: Order, action: str, exec_price: Decimal
-    ) -> None:
+    async def _execute_order(self, order: Order, action: str, exec_price: Decimal) -> None:
         """Execute an order and update position."""
         size = order.size
 
@@ -251,9 +268,7 @@ class MockExecutor:
 
         self._order_history.append(order)
 
-    async def _close_position_internal(
-        self, size: Decimal | None = None
-    ) -> Decimal:
+    async def _close_position_internal(self, size: Decimal | None = None) -> Decimal:
         """Close position and return realized P&L."""
         if not self._position:
             return Decimal("0")
@@ -351,6 +366,65 @@ class MockExecutor:
 
         logger.info(f"[MOCK] Position closed with P&L: {pnl:+.2f}")
         return order
+
+    async def reduce_position(self, symbol: str, side: Side, size: float) -> Order | None:
+        """Partially close a position.
+
+        Args:
+            symbol: Trading pair
+            side: Position side to reduce
+            size: Size to close (must be positive)
+
+        Returns:
+            Order object if successful
+        """
+        if size <= 0:
+            logger.error(f"[MOCK] Invalid reduce size: {size}")
+            return None
+
+        if not self._position or self._position.symbol != symbol:
+            logger.warning(f"[MOCK] No position to reduce for {symbol}")
+            return None
+
+        logger.info(f"[MOCK] Reducing position by {size}")
+        return await self.close_position(symbol, side, size)
+
+    async def add_to_position(
+        self,
+        symbol: str,
+        side: Side,
+        size: float,
+        stop_loss_price: float | None = None,
+    ) -> Order | None:
+        """Add to an existing position.
+
+        Args:
+            symbol: Trading pair
+            side: Position side to add to
+            size: Size to add
+            stop_loss_price: Optional stop loss price
+
+        Returns:
+            Order object if successful
+        """
+        if size <= 0:
+            logger.error(f"[MOCK] Invalid add size: {size}")
+            return None
+
+        try:
+            order = await self.place_order(
+                symbol=symbol,
+                side=side,
+                order_type=OrderType.MARKET,
+                size=size,
+                action="open",
+                stop_loss_price=stop_loss_price,
+            )
+            logger.info(f"[MOCK] Added {size} to position: {order.order_id}")
+            return order
+        except Exception as e:
+            logger.error(f"[MOCK] Failed to add to position: {e}")
+            return None
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         """Set leverage (just store it)."""

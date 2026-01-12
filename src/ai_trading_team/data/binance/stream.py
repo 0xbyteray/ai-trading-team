@@ -1,12 +1,15 @@
 """Binance WebSocket stream client."""
 
 import asyncio
+import contextlib
+import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import websockets
 from binance_common.configuration import ConfigurationWebSocketStreams
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
@@ -21,7 +24,16 @@ class BinanceStreamClient:
     """Binance Futures WebSocket stream client.
 
     Receives real-time market data from Binance USDS-M Futures.
+    Features:
+    - Automatic reconnection with exponential backoff
+    - Connection state tracking
+    - Callback-based event handling
     """
+
+    # Reconnection settings
+    MIN_RECONNECT_DELAY = 1.0  # Initial delay in seconds
+    MAX_RECONNECT_DELAY = 60.0  # Maximum delay in seconds
+    RECONNECT_MULTIPLIER = 2.0  # Exponential backoff multiplier
 
     def __init__(self) -> None:
         """Initialize Binance stream client."""
@@ -34,7 +46,16 @@ class BinanceStreamClient:
             "kline": [],
             "trade": [],
             "depth": [],
+            "reconnect": [],  # Callback for reconnection events
         }
+        # Reconnection state
+        self._reconnect_delay = self.MIN_RECONNECT_DELAY
+        self._reconnect_task: asyncio.Task | None = None
+        self._symbol: str | None = None
+        self._kline_interval: str = "1m"
+        # Raw depth WebSocket (bypass buggy SDK parsing)
+        self._depth_ws: Any = None
+        self._depth_task: asyncio.Task | None = None
 
     def _get_client(self) -> DerivativesTradingUsdsFutures:
         """Get or create Binance client."""
@@ -61,6 +82,34 @@ class BinanceStreamClient:
         """
         self._callbacks["kline"].append(callback)
 
+    def on_depth(self, callback: Callable[[list, list], None]) -> None:
+        """Register depth (orderbook) callback.
+
+        Args:
+            callback: Function to call with (bids, asks) updates
+        """
+        self._callbacks["depth"].append(callback)
+
+    def on_reconnect(self, callback: Callable[[int], None]) -> None:
+        """Register reconnection callback.
+
+        Args:
+            callback: Function to call with reconnection attempt count
+        """
+        self._callbacks["reconnect"].append(callback)
+
+    def _notify_reconnect(self, attempt: int) -> None:
+        """Notify reconnection callbacks.
+
+        Args:
+            attempt: Current reconnection attempt number
+        """
+        for callback in self._callbacks["reconnect"]:
+            try:
+                callback(attempt)
+            except Exception as e:
+                logger.error(f"Error in reconnect callback: {e}")
+
     async def connect(self, symbol: str, kline_interval: str = "1m") -> None:
         """Connect to WebSocket streams.
 
@@ -68,12 +117,17 @@ class BinanceStreamClient:
             symbol: Trading pair (e.g., "btcusdt")
             kline_interval: K-line interval (e.g., "1m", "5m")
         """
+        # Store connection parameters for reconnection
+        self._symbol = symbol
+        self._kline_interval = kline_interval
+
         client = self._get_client()
         self._running = True
 
         try:
             self._connection = await client.websocket_streams.create_connection()
             self._connected = True
+            self._reconnect_delay = self.MIN_RECONNECT_DELAY  # Reset on successful connect
             logger.info("WebSocket connection established")
 
             # Subscribe to ticker stream
@@ -92,10 +146,86 @@ class BinanceStreamClient:
             kline_stream.on("message", self._handle_kline)
             logger.info(f"Subscribed to kline stream: {symbol_lower}@{kline_interval}")
 
+            # Start raw depth WebSocket (bypass buggy SDK parsing)
+            self._depth_task = asyncio.create_task(
+                self._run_depth_stream(symbol_lower)
+            )
+            logger.info(f"Started raw depth stream: {symbol_lower}@depth10")
+
         except Exception as e:
             self._connected = False
             logger.error(f"Failed to connect WebSocket: {e}")
             raise
+
+    async def _run_depth_stream(self, symbol: str) -> None:
+        """Run raw WebSocket for depth data.
+
+        The Binance SDK has a bug where it doesn't parse depth messages correctly.
+        We use raw websockets to bypass the SDK and get proper orderbook data.
+
+        Args:
+            symbol: Trading pair in lowercase
+        """
+        uri = f"wss://stream.binance.com:9443/ws/{symbol}@depth10@100ms"
+
+        while self._running:
+            try:
+                async with websockets.connect(uri) as ws:
+                    self._depth_ws = ws
+                    logger.info(f"Raw depth WebSocket connected: {uri}")
+
+                    async for message in ws:
+                        if not self._running:
+                            break
+                        try:
+                            data = json.loads(message)
+                            self._handle_raw_depth(data)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Failed to parse depth message: {e}")
+
+            except websockets.exceptions.ConnectionClosed as e:
+                if self._running:
+                    logger.warning(f"Depth WebSocket closed: {e}, reconnecting...")
+                    await asyncio.sleep(1)
+            except Exception as e:
+                if self._running:
+                    logger.error(f"Depth WebSocket error: {e}, reconnecting...")
+                    await asyncio.sleep(1)
+
+        self._depth_ws = None
+
+    def _handle_raw_depth(self, data: dict) -> None:
+        """Handle raw depth data from WebSocket.
+
+        Args:
+            data: Raw JSON data with 'bids' and 'asks' keys
+        """
+        try:
+            bids_data = data.get("bids", [])
+            asks_data = data.get("asks", [])
+
+            bids = [[str(b[0]), str(b[1])] for b in bids_data if len(b) >= 2]
+            asks = [[str(a[0]), str(a[1])] for a in asks_data if len(a) >= 2]
+
+            if not bids and not asks:
+                return
+
+            # Validate orderbook integrity
+            if bids and asks:
+                best_bid = float(bids[0][0])
+                best_ask = float(asks[0][0])
+                if best_bid >= best_ask:
+                    logger.warning(
+                        f"Invalid orderbook: best_bid({best_bid}) >= best_ask({best_ask})"
+                    )
+                    return
+
+            # Notify callbacks
+            for callback in self._callbacks["depth"]:
+                callback(bids, asks)
+
+        except Exception as e:
+            logger.error(f"Error handling raw depth: {e}")
 
     def _handle_ticker(self, message: Any) -> None:
         """Handle incoming ticker data."""
@@ -159,6 +289,20 @@ class BinanceStreamClient:
         """Close WebSocket connection."""
         self._running = False
         self._connected = False
+
+        # Cancel depth stream task
+        if self._depth_task:
+            self._depth_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._depth_task
+            self._depth_task = None
+
+        # Close raw depth WebSocket
+        if self._depth_ws:
+            with contextlib.suppress(Exception):
+                await self._depth_ws.close()
+            self._depth_ws = None
+
         if self._connection:
             try:
                 await self._connection.close_connection(close_session=True)
@@ -169,6 +313,65 @@ class BinanceStreamClient:
                 self._connection = None
 
     async def run_forever(self) -> None:
-        """Keep the connection running."""
+        """Keep the connection running with automatic reconnection."""
+        reconnect_attempt = 0
+
         while self._running:
-            await asyncio.sleep(1)
+            if not self._connected and self._symbol:
+                reconnect_attempt += 1
+                logger.warning(
+                    f"WebSocket disconnected. Reconnecting in {self._reconnect_delay:.1f}s "
+                    f"(attempt {reconnect_attempt})..."
+                )
+                self._notify_reconnect(reconnect_attempt)
+
+                await asyncio.sleep(self._reconnect_delay)
+
+                # Exponential backoff
+                self._reconnect_delay = min(
+                    self._reconnect_delay * self.RECONNECT_MULTIPLIER,
+                    self.MAX_RECONNECT_DELAY,
+                )
+
+                try:
+                    await self.connect(self._symbol, self._kline_interval)
+                    reconnect_attempt = 0  # Reset on success
+                    logger.info("WebSocket reconnected successfully")
+                except Exception as e:
+                    logger.error(f"Reconnection failed: {e}")
+                    self._connected = False
+            else:
+                await asyncio.sleep(1)
+
+    async def _reconnect(self) -> None:
+        """Internal reconnection handler.
+
+        Called when connection is lost. Implements exponential backoff.
+        """
+        if not self._symbol:
+            logger.warning("Cannot reconnect: no symbol configured")
+            return
+
+        self._connected = False
+        reconnect_attempt = 0
+
+        while self._running and not self._connected:
+            reconnect_attempt += 1
+            logger.info(
+                f"Attempting reconnection {reconnect_attempt} in {self._reconnect_delay:.1f}s..."
+            )
+            self._notify_reconnect(reconnect_attempt)
+
+            await asyncio.sleep(self._reconnect_delay)
+
+            # Increase delay with exponential backoff
+            self._reconnect_delay = min(
+                self._reconnect_delay * self.RECONNECT_MULTIPLIER,
+                self.MAX_RECONNECT_DELAY,
+            )
+
+            try:
+                await self.connect(self._symbol, self._kline_interval)
+                logger.info("Reconnected successfully")
+            except Exception as e:
+                logger.error(f"Reconnection attempt {reconnect_attempt} failed: {e}")

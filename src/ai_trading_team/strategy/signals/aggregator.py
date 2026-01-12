@@ -204,9 +204,7 @@ class SignalAggregator:
 
         logger.info(f"Initialized {len(self._sources)} signal sources")
         for source in self._sources:
-            logger.debug(
-                f"  - {source.name}: timeframes={[tf.value for tf in source.timeframes]}"
-            )
+            logger.debug(f"  - {source.name}: timeframes={[tf.value for tf in source.timeframes]}")
 
     def _check_data_ready(self, snapshot: Any) -> bool:
         """Check if all required data is available.
@@ -360,8 +358,7 @@ class SignalAggregator:
 
         # Filter recent signals within window, excluding confluence signals themselves
         recent = [
-            s for s in self._recent_signals
-            if s.timestamp > cutoff and s.source != "aggregator"
+            s for s in self._recent_signals if s.timestamp > cutoff and s.source != "aggregator"
         ]
 
         if len(recent) < config.min_signals_for_confluence:
@@ -391,7 +388,9 @@ class SignalAggregator:
             return Signal(
                 signal_type=SignalType.BULLISH_CONFLUENCE,
                 direction=SignalDirection.BULLISH,
-                strength=SignalStrength.STRONG if bullish_score >= min_score * 2 else SignalStrength.MODERATE,
+                strength=SignalStrength.STRONG
+                if bullish_score >= min_score * 2
+                else SignalStrength.MODERATE,
                 timeframe=Timeframe.H1,  # Confluence is multi-timeframe
                 source="aggregator",
                 data={
@@ -411,7 +410,9 @@ class SignalAggregator:
             return Signal(
                 signal_type=SignalType.BEARISH_CONFLUENCE,
                 direction=SignalDirection.BEARISH,
-                strength=SignalStrength.STRONG if bearish_score >= min_score * 2 else SignalStrength.MODERATE,
+                strength=SignalStrength.STRONG
+                if bearish_score >= min_score * 2
+                else SignalStrength.MODERATE,
                 timeframe=Timeframe.H1,
                 source="aggregator",
                 data={
@@ -461,9 +462,7 @@ class SignalAggregator:
             states[source.name] = {
                 "enabled": source.enabled,
                 "timeframes": [tf.value for tf in source.timeframes],
-                "states": {
-                    tf.value: str(source.get_state(tf)) for tf in source.timeframes
-                },
+                "states": {tf.value: str(source.get_state(tf)) for tf in source.timeframes},
             }
         return states
 
@@ -475,3 +474,93 @@ class SignalAggregator:
         self._is_ready = False
         self._last_confluence_time = None
         logger.info("Signal aggregator reset")
+
+    def update_indicators(self) -> None:
+        """Update data pool with computed indicator values.
+
+        This method computes indicators from signal sources and stores them
+        in the data pool for the AI context.
+        """
+        snapshot = self._data_pool.get_snapshot()
+
+        if not self._check_data_ready(snapshot):
+            return
+
+        # Compute RSI, MA, MACD, BB for primary timeframe (H1)
+        h1_klines = snapshot.klines.get("1h", []) if snapshot.klines else []
+        if len(h1_klines) >= 60:
+            closes = [float(k.get("close", 0)) for k in h1_klines]
+
+            # RSI(14)
+            rsi = self._calculate_rsi(closes, 14)
+            if rsi is not None:
+                self._data_pool.update_indicator("RSI_14", round(rsi, 2))
+
+            # SMA(60)
+            if len(closes) >= 60:
+                sma_60 = sum(closes[-60:]) / 60
+                current_price = closes[-1]
+                position = "above" if current_price > sma_60 else "below"
+                distance_percent = ((current_price - sma_60) / sma_60) * 100
+                self._data_pool.update_indicator(
+                    "SMA_60",
+                    {
+                        "value": round(sma_60, 6),
+                        "price_position": position,
+                        "distance_percent": round(distance_percent, 2),
+                    },
+                )
+
+            # Bollinger Bands(20, 2)
+            if len(closes) >= 20:
+                bb = self._calculate_bollinger_bands(closes, 20, 2.0)
+                if bb:
+                    upper, middle, lower = bb
+                    current_price = closes[-1]
+                    self._data_pool.update_indicator(
+                        "BB_20",
+                        {
+                            "upper": round(upper, 6),
+                            "middle": round(middle, 6),
+                            "lower": round(lower, 6),
+                            "width_percent": round((upper - lower) / middle * 100, 2),
+                            "position": round((current_price - lower) / (upper - lower), 2)
+                            if upper != lower
+                            else 0.5,
+                        },
+                    )
+
+    def _calculate_rsi(self, closes: list[float], period: int) -> float | None:
+        """Calculate RSI from close prices."""
+        if len(closes) < period + 1:
+            return None
+
+        changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains = [max(0, c) for c in changes]
+        losses = [abs(min(0, c)) for c in changes]
+
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+
+        if avg_loss == 0:
+            return 100.0
+
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def _calculate_bollinger_bands(
+        self, closes: list[float], period: int, std_dev: float
+    ) -> tuple[float, float, float] | None:
+        """Calculate Bollinger Bands."""
+        if len(closes) < period:
+            return None
+
+        period_closes = closes[-period:]
+        middle = sum(period_closes) / len(period_closes)
+        variance = sum((c - middle) ** 2 for c in period_closes) / len(period_closes)
+        std = variance**0.5
+
+        upper = middle + (std_dev * std)
+        lower = middle - (std_dev * std)
+
+        return upper, middle, lower
