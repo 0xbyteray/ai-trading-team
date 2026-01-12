@@ -367,6 +367,63 @@ class TradingBot:
         if self._tui_app:
             self._tui_app.add_risk_event(event_type, message)
 
+    async def _upload_execution_log(
+        self,
+        decision: AgentDecision,
+        stage: str,
+        order: Any | None,
+        extra_output: dict[str, Any] | None = None,
+    ) -> None:
+        """Upload AI log with order execution details when available."""
+        output: dict[str, Any] = {
+            "action": decision.command.action.value,
+            "symbol": decision.command.symbol or self._execution_symbol,
+            "side": decision.command.side.value if decision.command.side else None,
+            "size": decision.command.size,
+            "order_type": decision.command.order_type.value
+            if decision.command.order_type
+            else None,
+        }
+        if order:
+            output.update(
+                {
+                    "order_id": getattr(order, "order_id", None),
+                    "executed_size": float(getattr(order, "size", 0) or 0),
+                    "executed_price": float(getattr(order, "price", 0) or 0)
+                    if getattr(order, "price", None) is not None
+                    else None,
+                    "status": getattr(order, "status", None).value
+                    if getattr(order, "status", None)
+                    else None,
+                }
+            )
+        if extra_output:
+            output.update(extra_output)
+
+        try:
+            await self._executor.upload_ai_log(
+                stage=stage,
+                model=decision.model,
+                input_data={
+                    "decision": {
+                        "action": decision.command.action.value,
+                        "symbol": decision.command.symbol or self._execution_symbol,
+                        "side": decision.command.side.value if decision.command.side else None,
+                        "size": decision.command.size,
+                        "price": decision.command.price,
+                        "order_type": decision.command.order_type.value
+                        if decision.command.order_type
+                        else None,
+                        "reason": decision.command.reason,
+                    }
+                },
+                output=output,
+                explanation=decision.command.reason,
+                order_id=getattr(order, "order_id", None),
+            )
+        except Exception as e:
+            self._logger.warning(f"Failed to upload execution AI log: {e}")
+
     def _safe_float(self, value: Any) -> float | None:
         try:
             return float(value)
@@ -1530,6 +1587,16 @@ class TradingBot:
                 self._logger.info(f"Position closed: {order.order_id}")
                 self._notify_agent_log("CLOSE", "Position closed", f"PnL: {realized_pnl:.2f}")
 
+                await self._upload_execution_log(
+                    decision,
+                    stage="Order Execution",
+                    order=order,
+                    extra_output={
+                        "execution_action": "close",
+                        "close_all": True,
+                    },
+                )
+
                 # Record trade
                 self._data_pool.record_trade(
                     pnl=realized_pnl,
@@ -1610,6 +1677,16 @@ class TradingBot:
                     f"Partial PnL: {partial_pnl:.2f}",
                 )
 
+                await self._upload_execution_log(
+                    decision,
+                    stage="Order Execution",
+                    order=order,
+                    extra_output={
+                        "execution_action": "reduce",
+                        "reduce_size": reduce_size,
+                    },
+                )
+
                 # Record partial trade
                 self._data_pool.record_trade(
                     pnl=partial_pnl,
@@ -1669,6 +1746,16 @@ class TradingBot:
                     "ADD",
                     f"Added {add_size:.4f}",
                     f"New size: {float(position.size) + add_size:.4f}",
+                )
+
+                await self._upload_execution_log(
+                    decision,
+                    stage="Order Execution",
+                    order=order,
+                    extra_output={
+                        "execution_action": "add",
+                        "add_size": add_size,
+                    },
                 )
 
                 # Record operation
@@ -1957,6 +2044,17 @@ class TradingBot:
                     self._logger.info(f"Opened position: {order.order_id}")
                     self._pending_entry_order_id = order.order_id or None
 
+                    await self._upload_execution_log(
+                        decision,
+                        stage="Order Execution",
+                        order=order,
+                        extra_output={
+                            "execution_action": "open",
+                            "stop_loss_price": stop_loss_price,
+                            "margin_mode": 3,
+                        },
+                    )
+
                     operation = {
                         "timestamp": datetime.now().isoformat(),
                         "action": "open",
@@ -1986,6 +2084,16 @@ class TradingBot:
                 )
                 if close_order:
                     self._logger.info(f"Closed position: {close_order.order_id}")
+
+                    await self._upload_execution_log(
+                        decision,
+                        stage="Order Execution",
+                        order=close_order,
+                        extra_output={
+                            "execution_action": "close",
+                            "close_size": command.size,
+                        },
+                    )
 
                     # Record the trade in trading statistics
                     self._data_pool.record_trade(

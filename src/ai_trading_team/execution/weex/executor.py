@@ -93,6 +93,19 @@ class WEEXExecutor:
             return getattr(value, "value")
         return value
 
+    def _truncate_explanation(self, explanation: str, limit: int = 1000) -> str:
+        if len(explanation) <= limit:
+            return explanation
+        return explanation[:limit]
+
+    def _normalize_order_id(self, order_id: int | str | None) -> int | None:
+        if order_id is None:
+            return None
+        try:
+            return int(order_id)
+        except (TypeError, ValueError):
+            return None
+
     def _decimal_or_zero(self, value: Any) -> Decimal:
         if value is None or value == "":
             return Decimal("0")
@@ -864,8 +877,8 @@ class WEEXExecutor:
                 model=model,
                 input_data=self._json_safe(input_data),
                 output=self._json_safe(output),
-                explanation=explanation,
-                order_id=order_id,
+                explanation=self._truncate_explanation(explanation),
+                order_id=self._normalize_order_id(order_id),
             )
             logger.info("Uploaded AI log to WEEX")
             return True
