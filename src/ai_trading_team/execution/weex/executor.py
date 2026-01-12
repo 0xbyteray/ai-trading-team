@@ -3,7 +3,7 @@
 import logging
 import uuid
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from weex_sdk import AsyncWeexClient
@@ -92,24 +92,83 @@ class WEEXExecutor:
             return getattr(value, "value")
         return value
 
+    def _decimal_or_zero(self, value: Any) -> Decimal:
+        if value is None or value == "":
+            return Decimal("0")
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal("0")
+
+    def _unwrap_payload(self, response: Any) -> Any:
+        if isinstance(response, dict):
+            for key in ("data", "result"):
+                if key in response and response[key] is not None:
+                    return response[key]
+        return response
+
+    def _extract_assets(self, response: Any) -> list[dict[str, Any]]:
+        payload = self._unwrap_payload(response)
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("assets", "list"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    def _extract_collateral(self, response: Any) -> list[dict[str, Any]]:
+        payload = self._unwrap_payload(response)
+        if isinstance(payload, dict):
+            collateral = payload.get("collateral")
+            if isinstance(collateral, list):
+                return collateral
+        return []
+
+    def _asset_coin(self, asset: dict[str, Any]) -> str:
+        coin = asset.get("coinName") or asset.get("coin") or ""
+        return str(coin).upper()
+
     async def get_account(self) -> Account:
         """Get account information."""
         client = self._ensure_connected()
-        accounts = await client.account.get_accounts()
+        assets_response = await client.get("/capi/v2/account/assets")
+        assets = self._extract_assets(assets_response)
 
-        # Find USDT account
+        # Find USDT asset balance (contract assets endpoint)
         total_equity = Decimal("0")
         available_balance = Decimal("0")
         used_margin = Decimal("0")
         unrealized_pnl = Decimal("0")
+        found_asset = False
 
-        for acc in accounts if isinstance(accounts, list) else [accounts]:
-            if acc.get("coin") == "USDT" or acc.get("marginCoin") == "USDT":
-                total_equity = Decimal(str(acc.get("equity", 0)))
-                available_balance = Decimal(str(acc.get("available", 0)))
-                used_margin = Decimal(str(acc.get("frozen", 0)))
-                unrealized_pnl = Decimal(str(acc.get("unrealisedPL", 0)))
+        for asset in assets:
+            if self._asset_coin(asset) == "USDT":
+                total_equity = self._decimal_or_zero(asset.get("equity"))
+                available_balance = self._decimal_or_zero(asset.get("available"))
+                used_margin = self._decimal_or_zero(asset.get("frozen"))
+                unrealized_raw = asset.get("unrealizePnl")
+                if unrealized_raw is None:
+                    unrealized_raw = asset.get("unrealizedPnl")
+                unrealized_pnl = self._decimal_or_zero(unrealized_raw)
+                found_asset = True
                 break
+
+        if not found_asset:
+            account = await client.account.get_account("USDT")
+            collateral = self._extract_collateral(account)
+            if not collateral:
+                accounts = await client.account.get_accounts()
+                collateral = self._extract_collateral(accounts)
+            for item in collateral:
+                if self._asset_coin(item) == "USDT":
+                    amount = self._decimal_or_zero(item.get("amount"))
+                    total_equity = amount
+                    available_balance = amount
+                    used_margin = Decimal("0")
+                    unrealized_pnl = Decimal("0")
+                    break
 
         return Account(
             total_equity=total_equity,
