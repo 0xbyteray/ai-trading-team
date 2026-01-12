@@ -4,21 +4,21 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/home/ubuntu/ai-trading-team
-Environment="PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin"
+User=root
+Group=root
+WorkingDirectory=/root/github/ai-trading-team
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 # 使用 uv 运行
-ExecStart=/home/ubuntu/.local/bin/uv run python main.py
+ExecStart=/root/.local/bin/uv run python main.py
 
 # 自动重启
 Restart=always
 RestartSec=10
 
 # 日志
-StandardOutput=append:/home/ubuntu/ai-trading-team/logs/service.log
-StandardError=append:/home/ubuntu/ai-trading-team/logs/service-error.log
+StandardOutput=journal
+StandardError=journal
 
 # 资源限制
 MemoryMax=2G

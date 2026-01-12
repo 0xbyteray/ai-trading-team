@@ -755,6 +755,21 @@ class TradingBot:
                 f"stop_loss={decision.command.stop_loss_price}"
             )
 
+            # Upload AI log (always when agent returns a decision)
+            try:
+                await self._executor.upload_ai_log(
+                    stage="Profit Signal",
+                    model=decision.model,
+                    input_data=profit_data,
+                    output={
+                        "action": decision.command.action.value,
+                        "stop_loss_price": decision.command.stop_loss_price,
+                    },
+                    explanation=decision.command.reason,
+                )
+            except Exception as e:
+                self._logger.warning(f"Failed to upload AI log: {e}")
+
             # Execute move_stop_loss if AI decided
             if decision.command.action == AgentAction.MOVE_STOP_LOSS:
                 if decision.command.stop_loss_price:
@@ -771,21 +786,6 @@ class TradingBot:
 
             elif decision.command.action == AgentAction.OBSERVE:
                 self._logger.info("AI decided to observe, not moving stop loss")
-
-            # Upload AI log
-            try:
-                await self._executor.upload_ai_log(
-                    stage="Profit Signal",
-                    model=decision.model,
-                    input_data=profit_data,
-                    output={
-                        "action": decision.command.action.value,
-                        "stop_loss_price": decision.command.stop_loss_price,
-                    },
-                    explanation=decision.command.reason,
-                )
-            except Exception as e:
-                self._logger.warning(f"Failed to upload AI log: {e}")
 
         except Exception as e:
             self._logger.error(f"Error processing profit signal: {e}")
@@ -1049,7 +1049,7 @@ class TradingBot:
             decision.command.reason[:60],
         )
 
-        # Upload AI decision log
+        # Upload AI decision log (always when agent returns a decision)
         try:
             await self._executor.upload_ai_log(
                 stage="Opposite Signal Processing",
@@ -1342,6 +1342,26 @@ class TradingBot:
             decision.command.reason[:60],
         )
 
+        # Upload AI log (always when agent returns a decision)
+        try:
+            await self._executor.upload_ai_log(
+                stage="Signal Processing",
+                model=decision.model,
+                input_data={
+                    "signal_type": signal.signal_type.value,
+                    "signal_data": signal.data,
+                    "market_snapshot": decision.market_snapshot,
+                },
+                output={
+                    "action": decision.command.action.value,
+                    "side": decision.command.side.value if decision.command.side else None,
+                    "size": decision.command.size,
+                },
+                explanation=decision.command.reason,
+            )
+        except Exception as e:
+            self._logger.warning(f"Failed to upload AI log: {e}")
+
         # Handle agent decision
         if decision.command.action == AgentAction.OBSERVE:
             self._state_machine.transition(StateTransition.AGENT_OBSERVE)
@@ -1378,26 +1398,6 @@ class TradingBot:
                 f"Unexpected action in entry signal: {decision.command.action.value}, treating as observe"
             )
             self._state_machine.transition(StateTransition.AGENT_OBSERVE)
-
-        # Upload AI log
-        try:
-            await self._executor.upload_ai_log(
-                stage="Signal Processing",
-                model=decision.model,
-                input_data={
-                    "signal_type": signal.signal_type.value,
-                    "signal_data": signal.data,
-                    "market_snapshot": decision.market_snapshot,
-                },
-                output={
-                    "action": decision.command.action.value,
-                    "side": decision.command.side.value if decision.command.side else None,
-                    "size": decision.command.size,
-                },
-                explanation=decision.command.reason,
-            )
-        except Exception as e:
-            self._logger.warning(f"Failed to upload AI log: {e}")
 
     async def _execute_command(self, decision: AgentDecision) -> bool:
         """Execute agent command with risk controls.
