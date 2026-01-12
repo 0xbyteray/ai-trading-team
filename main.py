@@ -313,7 +313,8 @@ class TradingBot:
         if position and not self._state_machine.has_position:
             pos_ctx = self._position_context_from_executor(position)
             self._logger.info("Detected open position; syncing state machine context")
-            self._state_machine.transition(StateTransition.AGENT_OPEN, {"position": pos_ctx})
+            if self._state_machine.can_transition(StateTransition.AGENT_OPEN):
+                self._state_machine.transition(StateTransition.AGENT_OPEN, {"position": pos_ctx})
 
     def _calculate_lock_in_stop_loss(
         self,
@@ -1156,7 +1157,10 @@ class TradingBot:
                 pos_ctx = self._position_context_from_snapshot(snapshot.position)
                 if pos_ctx:
                     self._logger.info("Syncing state from WS position snapshot")
-                    self._state_machine.transition(StateTransition.AGENT_OPEN, {"position": pos_ctx})
+                    if self._state_machine.can_transition(StateTransition.AGENT_OPEN):
+                        self._state_machine.transition(
+                            StateTransition.AGENT_OPEN, {"position": pos_ctx}
+                        )
 
             # Update trading statistics with current equity
             if position:
@@ -1205,10 +1209,11 @@ class TradingBot:
                         side=position.side,
                         margin=position.margin,
                     )
-                    self._state_machine.transition(
-                        StateTransition.AGENT_OPEN,
-                        {"position": pos_ctx},
-                    )
+                    if self._state_machine.can_transition(StateTransition.AGENT_OPEN):
+                        self._state_machine.transition(
+                            StateTransition.AGENT_OPEN,
+                            {"position": pos_ctx},
+                        )
                     self._pending_entry_order_id = None
                 else:
                     pending_id = self._pending_entry_order_id
@@ -1508,10 +1513,11 @@ class TradingBot:
                 pos_ctx = self._position_context_from_snapshot(snapshot.position)
                 if pos_ctx:
                     self._logger.info("Detected open position in data pool; syncing state")
-                    self._state_machine.transition(
-                        StateTransition.AGENT_OPEN,
-                        {"position": pos_ctx},
-                    )
+                    if self._state_machine.can_transition(StateTransition.AGENT_OPEN):
+                        self._state_machine.transition(
+                            StateTransition.AGENT_OPEN,
+                            {"position": pos_ctx},
+                        )
 
             # Only process actionable signals
             if not signal.is_actionable:
@@ -2052,10 +2058,11 @@ class TradingBot:
                             side=position.side,
                             margin=position.margin,
                         )
-                        self._state_machine.transition(
-                            StateTransition.AGENT_OPEN,
-                            {"position": pos_ctx},
-                        )
+                        if self._state_machine.can_transition(StateTransition.AGENT_OPEN):
+                            self._state_machine.transition(
+                                StateTransition.AGENT_OPEN,
+                                {"position": pos_ctx},
+                            )
                         self._pending_entry_order_id = None
                     else:
                         # Order accepted but position not visible yet; wait for fill/confirmation
