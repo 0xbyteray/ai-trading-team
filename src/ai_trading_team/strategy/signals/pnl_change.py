@@ -80,9 +80,17 @@ class PnLChangeSignal(SignalSource):
             return None
 
         # Calculate unrealized P&L and margin
-        total_pnl = float(position.get("unrealizedPnl", position.get("unrealisedPnl", 0)))
+        total_pnl = float(
+            position.get(
+                "unrealized_pnl",
+                position.get("unrealizedPnl", position.get("unrealisedPnl", 0)),
+            )
+        )
         total_margin = float(
-            position.get("margin", position.get("positionMargin", position.get("initialMargin", 0)))
+            position.get(
+                "margin",
+                position.get("positionMargin", position.get("initialMargin", 0)),
+            )
         )
 
         if total_margin <= 0:
