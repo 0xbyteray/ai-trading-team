@@ -21,7 +21,7 @@ import contextlib
 import logging
 import signal
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ai_trading_team.agent.commands import AgentAction
@@ -33,6 +33,7 @@ from ai_trading_team.core.session import SessionManager
 from ai_trading_team.core.types import OrderType, Side
 from ai_trading_team.data.manager import BinanceDataManager
 from ai_trading_team.execution.binance.executor import BinanceExecutor
+from ai_trading_team.execution.models import Position
 from ai_trading_team.execution.mock_executor import MockExecutor
 from ai_trading_team.execution.weex.executor import WEEXExecutor
 from ai_trading_team.execution.weex.stream import WEEXPrivateStream
@@ -250,6 +251,59 @@ class TradingBot:
 
         return price
 
+    def _to_decimal(self, value: Any) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except (TypeError, ValueError, InvalidOperation):
+            return Decimal("0")
+
+    def _position_context_from_snapshot(
+        self, position: dict[str, Any] | None
+    ) -> PositionContext | None:
+        if not position:
+            return None
+
+        size = self._to_decimal(position.get("size"))
+        if size <= 0:
+            return None
+
+        side_raw = str(position.get("side") or "").lower()
+        if side_raw == "long":
+            side = Side.LONG
+        elif side_raw == "short":
+            side = Side.SHORT
+        else:
+            side = Side.LONG
+
+        entry_price = self._to_decimal(position.get("entry_price"))
+        margin = self._to_decimal(position.get("margin"))
+        leverage = int(position.get("leverage") or self._config.trading.leverage)
+
+        return PositionContext(
+            symbol=self._execution_symbol,
+            side=side,
+            entry_price=entry_price,
+            size=size,
+            margin=margin,
+            leverage=leverage,
+        )
+
+    def _position_context_from_executor(self, position: Position) -> PositionContext:
+        return PositionContext(
+            symbol=position.symbol,
+            side=position.side,
+            entry_price=position.entry_price,
+            size=position.size,
+            margin=position.margin,
+            leverage=position.leverage,
+        )
+
+    def _sync_state_with_position(self, position: Position | None) -> None:
+        if position and not self._state_machine.has_position:
+            pos_ctx = self._position_context_from_executor(position)
+            self._logger.info("Detected open position; syncing state machine context")
+            self._state_machine.transition(StateTransition.AGENT_OPEN, {"position": pos_ctx})
+
     def _notify_signal(self, signal_type: str, details: str) -> None:
         """Send signal notification to TUI.
 
@@ -352,7 +406,12 @@ class TradingBot:
             if contract_id and contract_id != self._execution_symbol:
                 continue
 
-            size = self._safe_float(item.get("size")) or 0.0
+            size = self._safe_float(
+                item.get("size")
+                or item.get("total")
+                or item.get("holdSize")
+                or item.get("positionSize")
+            ) or 0.0
             if size == 0:
                 self._data_pool.update_position(None)
                 return
@@ -365,7 +424,12 @@ class TradingBot:
             if open_value and size:
                 entry_price = open_value / size
 
-            margin = self._safe_float(item.get("isolatedMargin"))
+            margin = self._safe_float(
+                item.get("isolatedMargin")
+                or item.get("margin")
+                or item.get("marginSize")
+                or item.get("positionMargin")
+            )
             if margin is None:
                 margin = snapshot.get("margin", 0.0)
 
@@ -884,13 +948,24 @@ class TradingBot:
                 self._data_pool.update_position(None)
 
             account = await self._executor.get_account()
+            margin_value = float(account.used_margin)
+            if margin_value <= 0 and position:
+                margin_value = float(position.margin) if position.margin else 0.0
+                if margin_value <= 0:
+                    leverage = position.leverage or self._config.trading.leverage or 1
+                    entry_price = float(position.entry_price) if position.entry_price else 0.0
+                    if entry_price > 0:
+                        margin_value = (float(position.size) * entry_price) / max(leverage, 1)
             self._data_pool.update_account(
                 {
                     "balance": float(account.total_equity),
                     "available": float(account.available_balance),
-                    "margin": float(account.used_margin),
+                    "margin": margin_value,
                 }
             )
+
+            if position:
+                self._sync_state_with_position(position)
 
             # Update trading statistics with current equity
             unrealized = float(position.unrealized_pnl) if position else 0.0
@@ -1157,6 +1232,16 @@ class TradingBot:
             signal: Signal to process
         """
         try:
+            snapshot = self._data_pool.get_snapshot()
+            if snapshot.position and not self._state_machine.has_position:
+                pos_ctx = self._position_context_from_snapshot(snapshot.position)
+                if pos_ctx:
+                    self._logger.info("Detected open position in data pool; syncing state")
+                    self._state_machine.transition(
+                        StateTransition.AGENT_OPEN,
+                        {"position": pos_ctx},
+                    )
+
             # Only process actionable signals
             if not signal.is_actionable:
                 self._logger.debug(f"Signal not actionable: {signal.signal_type.value}")
@@ -1665,12 +1750,39 @@ class TradingBot:
                 if command.side and command.size:
                     # Get current account to check margin
                     account = await self._executor.get_account()
+                    snapshot = self._data_pool.get_snapshot()
                     current_margin = float(account.used_margin)
+                    if current_margin <= 0 and snapshot.position:
+                        pos_margin = snapshot.position.get("margin", 0) if snapshot.position else 0
+                        try:
+                            pos_margin = float(pos_margin)
+                        except (TypeError, ValueError):
+                            pos_margin = 0.0
+                        if pos_margin <= 0:
+                            pos_size = snapshot.position.get("size", 0) if snapshot.position else 0
+                            pos_entry = (
+                                snapshot.position.get("entry_price", 0) if snapshot.position else 0
+                            )
+                            pos_leverage = (
+                                snapshot.position.get("leverage", self._config.trading.leverage)
+                                if snapshot.position
+                                else self._config.trading.leverage
+                            )
+                            try:
+                                pos_size = float(pos_size)
+                                pos_entry = float(pos_entry)
+                                pos_leverage = float(pos_leverage) if pos_leverage else 0
+                            except (TypeError, ValueError):
+                                pos_size = 0.0
+                                pos_entry = 0.0
+                                pos_leverage = 0.0
+                            if pos_size > 0 and pos_entry > 0 and pos_leverage > 0:
+                                pos_margin = (pos_size * pos_entry) / pos_leverage
+                        current_margin = pos_margin
                     available_balance = float(account.available_balance)
                     max_margin_limit = min(MAX_MARGIN_LIMIT, available_balance)
 
                     # Get current price for margin calculation
-                    snapshot = self._data_pool.get_snapshot()
                     current_price = float(
                         snapshot.ticker.get("last_price", 0) if snapshot.ticker else 0
                     )

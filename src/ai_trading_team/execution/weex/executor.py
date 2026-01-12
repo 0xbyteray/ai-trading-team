@@ -153,6 +153,123 @@ class WEEXExecutor:
             return value
         return (value / step).to_integral_value(rounding=rounding) * step
 
+    def _first_decimal(self, data: dict[str, Any], keys: tuple[str, ...]) -> Decimal:
+        for key in keys:
+            if key in data:
+                value = self._decimal_or_zero(data.get(key))
+                if value != 0:
+                    return value
+        return Decimal("0")
+
+    def _position_size(self, data: dict[str, Any]) -> Decimal:
+        size = self._first_decimal(
+            data,
+            (
+                "total",
+                "size",
+                "holdVolume",
+                "holdSize",
+                "positionSize",
+                "positionQty",
+                "qty",
+                "volume",
+            ),
+        )
+        return abs(size)
+
+    def _position_entry_price(self, data: dict[str, Any], size: Decimal) -> Decimal:
+        entry = self._first_decimal(
+            data,
+            (
+                "averageOpenPrice",
+                "avgOpenPrice",
+                "avgPrice",
+                "entryPrice",
+                "openPrice",
+                "openAvgPrice",
+            ),
+        )
+        if entry > 0:
+            return entry
+
+        open_value = self._first_decimal(data, ("openValue", "open_value", "openValue"))
+        if open_value > 0 and size > 0:
+            return open_value / size
+        return Decimal("0")
+
+    def _position_margin(self, data: dict[str, Any]) -> Decimal:
+        return self._first_decimal(
+            data,
+            (
+                "margin",
+                "isolatedMargin",
+                "marginSize",
+                "positionMargin",
+                "openMargin",
+                "marginAmount",
+            ),
+        )
+
+    def _position_leverage(self, data: dict[str, Any]) -> int:
+        leverage = self._first_decimal(data, ("leverage", "lever", "marginLeverage"))
+        return int(leverage) if leverage > 0 else 1
+
+    def _position_side(self, data: dict[str, Any]) -> Side | None:
+        side_raw = str(
+            data.get("holdSide") or data.get("side") or data.get("positionSide") or ""
+        ).lower()
+        if side_raw in {"long", "buy"}:
+            return Side.LONG
+        if side_raw in {"short", "sell"}:
+            return Side.SHORT
+        return None
+
+    def _position_unrealized(self, data: dict[str, Any]) -> Decimal:
+        return self._first_decimal(
+            data,
+            (
+                "unrealisedPL",
+                "unrealizedPL",
+                "unrealizedPnl",
+                "unrealisePnl",
+                "unrealizedPnL",
+            ),
+        )
+
+    def _parse_position(self, symbol: str, data: dict[str, Any]) -> Position | None:
+        size = self._position_size(data)
+        if size <= 0:
+            return None
+
+        side = self._position_side(data) or Side.LONG
+        entry_price = self._position_entry_price(data, size)
+        leverage = self._position_leverage(data)
+        margin = self._position_margin(data)
+        if margin <= 0 and entry_price > 0 and leverage > 0:
+            margin = (size * entry_price) / Decimal(leverage)
+
+        unrealized = self._position_unrealized(data)
+        realized_raw = data.get("realisedPL")
+        if realized_raw is None:
+            realized_raw = data.get("realizedPL")
+
+        liquidation_price = data.get("liquidationPrice") or data.get("liquidation_price")
+
+        return Position(
+            symbol=symbol,
+            side=side,
+            size=size,
+            entry_price=entry_price,
+            leverage=leverage,
+            unrealized_pnl=unrealized,
+            realized_pnl=self._decimal_or_zero(realized_raw),
+            liquidation_price=self._decimal_or_zero(liquidation_price)
+            if liquidation_price
+            else None,
+            margin=margin,
+            status=PositionStatus.OPEN,
+        )
+
     async def _get_contract(self, symbol: str) -> dict[str, Any]:
         if symbol in self._contract_cache:
             return self._contract_cache[symbol]
@@ -218,6 +335,11 @@ class WEEXExecutor:
                 total_equity = self._decimal_or_zero(asset.get("equity"))
                 available_balance = self._decimal_or_zero(asset.get("available"))
                 used_margin = self._decimal_or_zero(asset.get("frozen"))
+                equity_minus_available = total_equity - available_balance
+                if equity_minus_available > used_margin:
+                    used_margin = equity_minus_available
+                if used_margin < 0:
+                    used_margin = Decimal("0")
                 unrealized_raw = asset.get("unrealizePnl")
                 if unrealized_raw is None:
                     unrealized_raw = asset.get("unrealizedPnl")
@@ -255,35 +377,17 @@ class WEEXExecutor:
         if isinstance(data, list):
             data = data[0] if data else None
 
-        if not isinstance(data, dict):
-            return None
+        if isinstance(data, dict):
+            position = self._parse_position(symbol, data)
+            if position:
+                return position
 
-        # WEEX returns position data
-        size = self._decimal_or_zero(data.get("total"))
-        if size == 0:
-            return None
+        # Fallback to all positions if single-position endpoint lacks data
+        for position in await self.get_positions():
+            if position.symbol == symbol:
+                return position
 
-        side_str = data.get("holdSide", data.get("side", "long"))
-        side = Side.LONG if side_str.lower() == "long" else Side.SHORT
-
-        unrealized_raw = data.get("unrealisedPL")
-        if unrealized_raw is None:
-            unrealized_raw = data.get("unrealizedPL")
-
-        return Position(
-            symbol=symbol,
-            side=side,
-            size=size,
-            entry_price=self._decimal_or_zero(data.get("averageOpenPrice")),
-            leverage=int(self._decimal_or_zero(data.get("leverage"))) or 1,
-            unrealized_pnl=self._decimal_or_zero(unrealized_raw),
-            realized_pnl=self._decimal_or_zero(data.get("realisedPL")),
-            liquidation_price=self._decimal_or_zero(data.get("liquidationPrice"))
-            if data.get("liquidationPrice")
-            else None,
-            margin=self._decimal_or_zero(data.get("margin")),
-            status=PositionStatus.OPEN,
-        )
+        return None
 
     async def get_positions(self) -> list[Position]:
         """Get all open positions."""
@@ -293,25 +397,10 @@ class WEEXExecutor:
 
         positions = []
         for item in data:
-            size = self._decimal_or_zero(item.get("total"))
-            if size > 0:
-                side_str = item.get("holdSide", item.get("side", "long"))
-                side = Side.LONG if side_str.lower() == "long" else Side.SHORT
-                unrealized_raw = item.get("unrealisedPL")
-                if unrealized_raw is None:
-                    unrealized_raw = item.get("unrealizedPL")
-
-                positions.append(
-                    Position(
-                        symbol=item.get("symbol", ""),
-                        side=side,
-                        size=size,
-                        entry_price=self._decimal_or_zero(item.get("averageOpenPrice")),
-                        leverage=int(self._decimal_or_zero(item.get("leverage"))) or 1,
-                        unrealized_pnl=self._decimal_or_zero(unrealized_raw),
-                        status=PositionStatus.OPEN,
-                    )
-                )
+            symbol = item.get("symbol", "")
+            position = self._parse_position(symbol, item)
+            if position:
+                positions.append(position)
 
         return positions
 
