@@ -3,7 +3,7 @@
 import logging
 import uuid
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any
 
 from weex_sdk import AsyncWeexClient
@@ -43,6 +43,7 @@ class WEEXExecutor:
         self._passphrase = passphrase
         self._client: AsyncWeexClient | None = None
         self._connected = False
+        self._contract_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def name(self) -> str:
@@ -140,6 +141,64 @@ class WEEXExecutor:
     def _asset_coin(self, asset: dict[str, Any]) -> str:
         coin = asset.get("coinName") or asset.get("coin") or ""
         return str(coin).upper()
+
+    def _format_decimal(self, value: Decimal) -> str:
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+
+    def _quantize_step(self, value: Decimal, step: Decimal, rounding: str) -> Decimal:
+        if step <= 0:
+            return value
+        return (value / step).to_integral_value(rounding=rounding) * step
+
+    async def _get_contract(self, symbol: str) -> dict[str, Any]:
+        if symbol in self._contract_cache:
+            return self._contract_cache[symbol]
+
+        client = self._ensure_connected()
+        response = await client.get("/capi/v2/market/contracts", params={"symbol": symbol})
+        contracts = self._extract_list(response, ("contracts", "list"))
+        for item in contracts:
+            if item.get("symbol") == symbol:
+                self._contract_cache[symbol] = item
+                return item
+        return {}
+
+    def _size_step_from_contract(self, contract: dict[str, Any]) -> Decimal:
+        size_increment = contract.get("size_increment") or contract.get("sizeIncrement")
+        min_order_size = contract.get("minOrderSize") or contract.get("min_order_size")
+
+        step_from_increment = Decimal("0")
+        if size_increment not in (None, ""):
+            try:
+                decimals = int(size_increment)
+                step_from_increment = Decimal("1") / (Decimal("10") ** Decimal(decimals))
+            except (ValueError, InvalidOperation):
+                step_from_increment = Decimal("0")
+
+        min_size = self._decimal_or_zero(min_order_size)
+        if step_from_increment > 0 and min_size > 0:
+            return max(step_from_increment, min_size)
+        if min_size > 0:
+            return min_size
+        return step_from_increment
+
+    def _price_step_from_contract(self, contract: dict[str, Any]) -> Decimal:
+        tick_size = contract.get("tick_size") or contract.get("tickSize")
+        price_end_step = contract.get("priceEndStep") or contract.get("price_end_step")
+
+        if tick_size in (None, ""):
+            return Decimal("0")
+
+        try:
+            decimals = int(tick_size)
+        except (ValueError, InvalidOperation):
+            return Decimal("0")
+
+        step = self._decimal_or_zero(price_end_step) or Decimal("1")
+        return step / (Decimal("10") ** Decimal(decimals))
 
     async def get_account(self) -> Account:
         """Get account information."""
@@ -283,6 +342,41 @@ class WEEXExecutor:
             Created Order object
         """
         client = self._ensure_connected()
+        contract = await self._get_contract(symbol)
+        size_step = self._size_step_from_contract(contract)
+        price_step = self._price_step_from_contract(contract)
+
+        size_decimal = self._decimal_or_zero(size)
+        if size_step > 0:
+            min_size = self._decimal_or_zero(contract.get("minOrderSize"))
+            if min_size > 0 and size_decimal < min_size:
+                raise ValueError(
+                    f"Order size {size_decimal} below minimum {min_size} (step={size_step})"
+                )
+        adjusted_size = self._quantize_step(size_decimal, size_step, ROUND_DOWN)
+        if adjusted_size <= 0:
+            raise ValueError(
+                f"Order size {size_decimal} invalid after step adjustment (step={size_step})"
+            )
+
+        adjusted_price: Decimal | None = None
+        if price is not None:
+            adjusted_price = self._quantize_step(
+                self._decimal_or_zero(price), price_step, ROUND_DOWN
+            )
+
+        adjusted_stop_loss: Decimal | None = None
+        if stop_loss_price is not None:
+            rounding = ROUND_DOWN if side == Side.LONG else ROUND_UP
+            adjusted_stop_loss = self._quantize_step(
+                self._decimal_or_zero(stop_loss_price), price_step, rounding
+            )
+
+        adjusted_take_profit: Decimal | None = None
+        if take_profit_price is not None:
+            adjusted_take_profit = self._quantize_step(
+                self._decimal_or_zero(take_profit_price), price_step, ROUND_DOWN
+            )
 
         # Generate unique client order ID
         client_oid = f"mvp_{uuid.uuid4().hex[:16]}"
@@ -303,26 +397,28 @@ class WEEXExecutor:
         order_params: dict[str, Any] = {
             "symbol": symbol,
             "client_oid": client_oid,
-            "size": str(size),
+            "size": self._format_decimal(adjusted_size),
             "order_type": weex_order_type,
             "match_price": match_price,
             "type": type_code,
             "margin_mode": 3,
         }
 
-        if order_type == OrderType.LIMIT and price is not None:
-            order_params["price"] = str(price)
+        if order_type == OrderType.LIMIT and adjusted_price is not None:
+            order_params["price"] = self._format_decimal(adjusted_price)
         elif order_type == OrderType.MARKET:
-            order_params["price"] = str(price) if price is not None else "0"
+            order_params["price"] = (
+                self._format_decimal(adjusted_price) if adjusted_price is not None else "0"
+            )
 
         # Add preset stop loss if provided (for opening positions)
-        if action == "open" and stop_loss_price is not None:
-            order_params["preset_stop_loss_price"] = str(stop_loss_price)
-            logger.info(f"Setting preset stop loss at {stop_loss_price}")
+        if action == "open" and adjusted_stop_loss is not None:
+            order_params["preset_stop_loss_price"] = self._format_decimal(adjusted_stop_loss)
+            logger.info(f"Setting preset stop loss at {adjusted_stop_loss}")
 
         # Add preset take profit if provided
-        if action == "open" and take_profit_price is not None:
-            order_params["preset_take_profit_price"] = str(take_profit_price)
+        if action == "open" and adjusted_take_profit is not None:
+            order_params["preset_take_profit_price"] = self._format_decimal(adjusted_take_profit)
 
         logger.info(f"Placing order: {order_params}")
 
@@ -332,8 +428,8 @@ class WEEXExecutor:
             symbol=symbol,
             side=side,
             order_type=order_type,
-            size=Decimal(str(size)),
-            price=Decimal(str(price)) if price else None,
+            size=adjusted_size,
+            price=adjusted_price,
             status=OrderStatus.NEW,
             client_order_id=client_oid,
             order_id=str(result.get("order_id", "")),
