@@ -1,5 +1,6 @@
 """WEEX WebSocket stream for account updates."""
 
+import inspect
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -8,6 +9,34 @@ from typing import Any
 from weex_sdk import AsyncWeexWebSocket
 
 logger = logging.getLogger(__name__)
+
+def _patch_websockets_headers() -> None:
+    try:
+        import websockets
+    except ImportError:
+        return
+
+    if getattr(websockets.connect, "_weex_headers_patched", False):
+        return
+
+    try:
+        sig = inspect.signature(websockets.connect)
+        if "extra_headers" in sig.parameters:
+            return
+    except (TypeError, ValueError):
+        return
+
+    original_connect = websockets.connect
+
+    def connect_wrapper(*args: Any, **kwargs: Any) -> Any:
+        if "extra_headers" in kwargs and "headers" not in kwargs:
+            kwargs["headers"] = kwargs.pop("extra_headers")
+        else:
+            kwargs.pop("extra_headers", None)
+        return original_connect(*args, **kwargs)
+
+    connect_wrapper._weex_headers_patched = True  # type: ignore[attr-defined]
+    websockets.connect = connect_wrapper
 
 
 class WEEXStream(ABC):
@@ -75,6 +104,7 @@ class WEEXPrivateStream(WEEXStream):
 
     async def connect(self) -> None:
         """Establish WebSocket connection."""
+        _patch_websockets_headers()
         await self._ws.connect()
         logger.info("WEEX private WebSocket connected")
 
