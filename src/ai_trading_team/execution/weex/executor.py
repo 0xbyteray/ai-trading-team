@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -76,6 +77,20 @@ class WEEXExecutor:
         if not self._client or not self._connected:
             raise RuntimeError("Not connected to WEEX")
         return self._client
+
+    def _json_safe(self, value: Any) -> Any:
+        """Convert values to JSON-serializable forms for WEEX AI logs."""
+        if isinstance(value, dict):
+            return {k: self._json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(v) for v in value]
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return str(value)
+        if hasattr(value, "value"):
+            return getattr(value, "value")
+        return value
 
     async def get_account(self) -> Account:
         """Get account information."""
@@ -215,6 +230,8 @@ class WEEXExecutor:
 
         if order_type == OrderType.LIMIT and price is not None:
             order_params["price"] = str(price)
+        elif order_type == OrderType.MARKET:
+            order_params["price"] = str(price) if price is not None else "0"
 
         # Add preset stop loss if provided (for opening positions)
         if action == "open" and stop_loss_price is not None:
@@ -438,8 +455,8 @@ class WEEXExecutor:
             await client.ai.upload_ai_log(
                 stage=stage,
                 model=model,
-                input_data=input_data,
-                output=output,
+                input_data=self._json_safe(input_data),
+                output=self._json_safe(output),
                 explanation=explanation,
                 order_id=order_id,
             )
