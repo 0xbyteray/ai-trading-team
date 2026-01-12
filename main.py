@@ -1634,6 +1634,8 @@ class TradingBot:
                     # Get current account to check margin
                     account = await self._executor.get_account()
                     current_margin = float(account.used_margin)
+                    available_balance = float(account.available_balance)
+                    max_margin_limit = min(MAX_MARGIN_LIMIT, available_balance)
 
                     # Get current price for margin calculation
                     snapshot = self._data_pool.get_snapshot()
@@ -1647,19 +1649,37 @@ class TradingBot:
                     # Calculate margin for this order
                     # Margin = Position Value / Leverage = (Size * Price) / Leverage
                     leverage = self._config.trading.leverage
-                    order_margin = (command.size * current_price) / leverage
-
-                    # Check if adding this position would exceed margin limit
-                    total_margin = current_margin + order_margin
-                    if total_margin > MAX_MARGIN_LIMIT:
+                    max_size = ((max_margin_limit - current_margin) * leverage) / current_price
+                    if max_size <= 0:
                         self._logger.warning(
-                            f"Order rejected: would exceed margin limit. "
-                            f"Current: ${current_margin:.2f}, Order: ${order_margin:.2f}, "
-                            f"Total: ${total_margin:.2f}, Limit: ${MAX_MARGIN_LIMIT}"
+                            f"Order rejected: margin limit reached. "
+                            f"Current: ${current_margin:.2f}, Limit: ${max_margin_limit:.2f}"
                         )
                         self._notify_risk_event(
                             "MARGIN_LIMIT",
-                            f"Order rejected: ${total_margin:.0f} exceeds ${MAX_MARGIN_LIMIT} limit",
+                            f"Order rejected: margin limit ${max_margin_limit:.0f} reached",
+                        )
+                        return False
+
+                    order_size = min(command.size, max_size)
+                    if order_size < command.size:
+                        self._logger.warning(
+                            f"Order size adjusted to fit margin limit. "
+                            f"Requested: {command.size:.6f}, Allowed: {order_size:.6f}, "
+                            f"Limit: ${max_margin_limit:.2f}"
+                        )
+
+                    order_margin = (order_size * current_price) / leverage
+                    total_margin = current_margin + order_margin
+                    if total_margin > max_margin_limit:
+                        self._logger.warning(
+                            f"Order rejected: would exceed margin limit. "
+                            f"Current: ${current_margin:.2f}, Order: ${order_margin:.2f}, "
+                            f"Total: ${total_margin:.2f}, Limit: ${max_margin_limit:.2f}"
+                        )
+                        self._notify_risk_event(
+                            "MARGIN_LIMIT",
+                            f"Order rejected: margin ${total_margin:.0f} exceeds ${max_margin_limit:.0f}",
                         )
                         return False
 
@@ -1673,7 +1693,7 @@ class TradingBot:
                         stop_loss_price = current_price * (1 + stop_loss_offset)
 
                     self._logger.info(
-                        f"Opening position: {command.side.value} {command.size} @ ~{current_price:.4f}, "
+                        f"Opening position: {command.side.value} {order_size} @ ~{current_price:.4f}, "
                         f"margin: ${order_margin:.2f}, stop loss: {stop_loss_price:.4f}"
                     )
 
@@ -1681,7 +1701,7 @@ class TradingBot:
                         symbol=self._execution_symbol,
                         side=command.side,
                         order_type=command.order_type or OrderType.MARKET,
-                        size=command.size,
+                        size=order_size,
                         price=command.price,
                         action="open",
                         stop_loss_price=stop_loss_price,
@@ -1692,7 +1712,7 @@ class TradingBot:
                         "timestamp": datetime.now().isoformat(),
                         "action": "open",
                         "side": command.side.value,
-                        "size": command.size,
+                        "size": order_size,
                         "margin": order_margin,
                         "stop_loss_price": stop_loss_price,
                         "result": "success",

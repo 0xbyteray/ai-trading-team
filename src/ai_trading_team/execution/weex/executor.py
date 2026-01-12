@@ -307,6 +307,7 @@ class WEEXExecutor:
             "order_type": weex_order_type,
             "match_price": match_price,
             "type": type_code,
+            "margin_mode": 3,
         }
 
         if order_type == OrderType.LIMIT and price is not None:
@@ -497,9 +498,14 @@ class WEEXExecutor:
         client = self._ensure_connected()
 
         try:
+            await client.account.change_hold_model(
+                symbol=symbol,
+                margin_mode=3,  # Isolated margin
+                separated_mode=1,
+            )
             await client.account.set_leverage(
                 symbol=symbol,
-                margin_mode=1,  # Cross margin
+                margin_mode=3,  # Isolated margin
                 long_leverage=str(leverage),
                 short_leverage=str(leverage),
             )
