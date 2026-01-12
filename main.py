@@ -202,6 +202,10 @@ class TradingBot:
         self._ws_orders_ttl = 8.0
         self._last_backlog_log = 0.0
         self._backlog_log_interval = 30.0
+        self._no_position_count = 0
+        self._no_position_threshold = 2
+        self._pending_close: dict[str, Any] | None = None
+        self._pending_close_started = 0.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -378,6 +382,60 @@ class TradingBot:
         """
         if self._tui_app:
             self._tui_app.add_risk_event(event_type, message)
+
+    def _build_close_info_from_context(self, reason: str) -> dict[str, Any] | None:
+        pos = self._state_machine._context.position
+        if not pos.side or pos.size <= 0:
+            return None
+        return {
+            "action": "close",
+            "side": pos.side.value,
+            "size": float(pos.size),
+            "entry_price": float(pos.entry_price),
+            "exit_price": self._get_current_price(),
+            "pnl": float(pos.unrealized_pnl),
+            "reason": reason[:100] if reason else None,
+        }
+
+    def _set_pending_close(self, info: dict[str, Any] | None) -> None:
+        if info:
+            self._pending_close = info
+        self._pending_close_started = asyncio.get_event_loop().time()
+        self._logger.info("Close order placed; awaiting position confirmation")
+
+    def _finalize_close(self, reason: str) -> None:
+        info = self._pending_close or self._build_close_info_from_context(reason)
+        if info and info.get("size") and info.get("side"):
+            pnl = float(info.get("pnl", 0.0))
+            entry_price = float(info.get("entry_price", 0.0))
+            exit_price = float(info.get("exit_price", 0.0))
+            size = float(info.get("size", 0.0))
+            side = str(info.get("side") or "")
+            self._data_pool.record_trade(
+                pnl=pnl,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                side=side,
+                size=size,
+            )
+            operation = {
+                "timestamp": datetime.now().isoformat(),
+                "action": info.get("action", "close"),
+                "side": side,
+                "size": size,
+                "pnl": pnl,
+                "reason": info.get("reason"),
+                "result": "success",
+                "order_id": info.get("order_id"),
+            }
+            self._data_pool.add_operation(operation)
+            self._session_manager.add_operation(operation)
+
+        if self._state_machine.can_transition(StateTransition.POSITION_CLOSED):
+            self._state_machine.transition(StateTransition.POSITION_CLOSED)
+        self._risk_monitor.reset_rules()
+        self._pending_close = None
+        self._pending_close_started = 0.0
 
     async def _upload_execution_log(
         self,
@@ -1098,7 +1156,16 @@ class TradingBot:
             )
 
             position = await self._executor.get_position(self._execution_symbol)
-            if position:
+            position_size = float(position.size) if position else 0.0
+            snapshot_position = snapshot.position if ws_position_recent else None
+            snapshot_size = (
+                self._safe_float(snapshot_position.get("size")) if snapshot_position else 0.0
+            )
+            has_position_now = (position and position_size > 0) or (
+                snapshot_position and snapshot_size > 0
+            )
+
+            if position and position_size > 0:
                 self._data_pool.update_position(
                     {
                         "symbol": position.symbol,
@@ -1110,9 +1177,9 @@ class TradingBot:
                         "leverage": position.leverage,
                     }
                 )
-            elif ws_position_recent and snapshot.position:
+            elif ws_position_recent and snapshot_position and snapshot_size > 0:
                 self._logger.debug("Keeping WS position snapshot; REST returned empty")
-            elif not ws_position_recent:
+            elif not ws_position_recent or (snapshot_position and snapshot_size <= 0):
                 self._data_pool.update_position(None)
 
             account = await self._executor.get_account()
@@ -1163,16 +1230,67 @@ class TradingBot:
                         )
 
             # Update trading statistics with current equity
-            if position:
+            if position and position_size > 0:
                 unrealized = float(position.unrealized_pnl)
-            elif ws_position_recent and snapshot.position:
-                unrealized = self._safe_float(snapshot.position.get("unrealized_pnl")) or 0.0
+            elif ws_position_recent and snapshot_position and snapshot_size > 0:
+                unrealized = self._safe_float(snapshot_position.get("unrealized_pnl")) or 0.0
             else:
                 unrealized = 0.0
             self._data_pool.update_equity(
                 current_equity=float(account.total_equity),
                 unrealized_pnl=unrealized,
             )
+
+            if has_position_now:
+                self._no_position_count = 0
+                pnl_unrealized = Decimal(str(unrealized))
+                margin_for_percent = Decimal("0")
+                if position and position_size > 0:
+                    margin_for_percent = Decimal(str(position.margin or 0))
+                elif snapshot_position:
+                    margin_for_percent = Decimal(str(snapshot_position.get("margin") or 0))
+                if margin_for_percent <= 0 and margin_value > 0:
+                    margin_for_percent = Decimal(str(margin_value))
+                if margin_for_percent > 0:
+                    pnl_percent = (pnl_unrealized / margin_for_percent) * Decimal("100")
+                else:
+                    pnl_percent = Decimal("0")
+                self._state_machine.update_position_metrics(pnl_unrealized, pnl_percent)
+                if (
+                    self._pending_close
+                    and self._pending_close_started > 0
+                    and (now - self._pending_close_started)
+                    > self._state_machine.context.waiting_exit_timeout
+                ):
+                    self._logger.warning(
+                        "Close confirmation timed out; position still open"
+                    )
+                    self._pending_close = None
+                    self._pending_close_started = 0.0
+            else:
+                self._no_position_count += 1
+                if (
+                    self._pending_close
+                    and self._pending_close_started > 0
+                    and (now - self._pending_close_started)
+                    > self._state_machine.context.waiting_exit_timeout
+                ):
+                    self._logger.warning(
+                        "Close confirmation timed out; clearing pending close info"
+                    )
+                    self._pending_close = None
+                    self._pending_close_started = 0.0
+
+                if self._no_position_count >= self._no_position_threshold:
+                    if self._pending_close:
+                        self._logger.info("Position closed confirmed by exchange")
+                        self._finalize_close("position_closed_confirmed")
+                    elif self._state_machine.has_position or self._state_machine.state in (
+                        StrategyState.WAITING_EXIT,
+                        StrategyState.RISK_OVERRIDE,
+                    ):
+                        self._logger.warning("Position missing; syncing state to closed")
+                        self._finalize_close("position_missing")
 
             now = asyncio.get_event_loop().time()
             if not ws_orders_recent and now - self._last_orders_sync >= self._orders_sync_interval:
@@ -1300,8 +1418,7 @@ class TradingBot:
                 # AI decided to close instead of moving stop loss
                 success = await self._execute_command(decision)
                 if success:
-                    self._state_machine.transition(StateTransition.POSITION_CLOSED)
-                    self._risk_monitor.reset_rules()
+                    self._logger.info("Close order placed from profit signal; awaiting confirmation")
 
             elif decision.command.action == AgentAction.OBSERVE:
                 self._logger.info("AI decided to observe, not moving stop loss")
@@ -1471,32 +1588,18 @@ class TradingBot:
                                 "CLOSE", f"Force closed {position.side.value}", "Risk triggered"
                             )
 
-                            # Record the trade in trading statistics
-                            self._data_pool.record_trade(
-                                pnl=realized_pnl,
-                                entry_price=entry_price,
-                                exit_price=exit_price,
-                                side=trade_side,
-                                size=trade_size,
-                            )
-                            self._logger.info(
-                                f"Trade recorded: {trade_side} P&L=${realized_pnl:+.2f}"
-                            )
-
-                            self._data_pool.add_operation(
+                            self._set_pending_close(
                                 {
-                                    "timestamp": datetime.now().isoformat(),
                                     "action": "force_close",
-                                    "side": position.side.value,
-                                    "size": float(position.size),
+                                    "side": trade_side,
+                                    "size": trade_size,
+                                    "entry_price": entry_price,
+                                    "exit_price": exit_price,
                                     "pnl": realized_pnl,
-                                    "result": "success",
                                     "reason": action.reason,
+                                    "order_id": order.order_id,
                                 }
                             )
-
-                            self._state_machine.transition(StateTransition.POSITION_CLOSED)
-                            self._risk_monitor.reset_rules()
 
         except Exception as e:
             self._logger.error(f"Error checking risk: {e}")
@@ -1765,30 +1868,16 @@ class TradingBot:
                     },
                 )
 
-                # Record trade
-                self._data_pool.record_trade(
-                    pnl=realized_pnl,
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    side=trade_side,
-                    size=trade_size,
-                )
-
-                # Transition state machine
-                self._state_machine.transition(StateTransition.POSITION_CLOSED)
-
-                # Reset risk monitor
-                self._risk_monitor.reset_rules()
-
-                # Record operation
-                self._data_pool.add_operation(
+                self._set_pending_close(
                     {
-                        "timestamp": datetime.now().isoformat(),
                         "action": "close",
                         "side": trade_side,
                         "size": trade_size,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "pnl": realized_pnl,
                         "reason": decision.command.reason[:100],
-                        "result": "success",
+                        "order_id": order.order_id,
                     }
                 )
 
@@ -2273,29 +2362,18 @@ class TradingBot:
                         },
                     )
 
-                    # Record the trade in trading statistics
-                    self._data_pool.record_trade(
-                        pnl=realized_pnl,
-                        entry_price=entry_price,
-                        exit_price=exit_price,
-                        side=command.side.value,
-                        size=trade_size,
+                    self._set_pending_close(
+                        {
+                            "action": "close",
+                            "side": command.side.value,
+                            "size": trade_size,
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "pnl": realized_pnl,
+                            "reason": decision.command.reason[:100],
+                            "order_id": close_order.order_id,
+                        }
                     )
-                    self._logger.info(
-                        f"Trade recorded: {command.side.value} P&L=${realized_pnl:+.2f}"
-                    )
-
-                    operation = {
-                        "timestamp": datetime.now().isoformat(),
-                        "action": "close",
-                        "side": command.side.value,
-                        "size": command.size,
-                        "pnl": realized_pnl,
-                        "result": "success",
-                        "order_id": close_order.order_id,
-                    }
-                    self._data_pool.add_operation(operation)
-                    self._session_manager.add_operation(operation)
                     return True
 
         except Exception as e:

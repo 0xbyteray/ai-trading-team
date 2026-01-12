@@ -180,6 +180,7 @@ class StrategyStateMachine:
             ],
             StrategyState.RISK_OVERRIDE: [
                 (StateTransition.POSITION_CLOSED, StrategyState.COOLDOWN),
+                (StateTransition.TIMEOUT, StrategyState.IN_POSITION),
             ],
             StrategyState.COOLDOWN: [
                 (StateTransition.COOLDOWN_EXPIRED, StrategyState.IDLE),
@@ -398,6 +399,20 @@ class StrategyStateMachine:
 
         return None
 
+    def update_position_metrics(
+        self,
+        unrealized_pnl: Decimal,
+        unrealized_pnl_percent: Decimal,
+    ) -> None:
+        """Update position metrics without triggering transitions."""
+        if not self.has_position:
+            return
+
+        self._context.position.unrealized_pnl = unrealized_pnl
+        self._context.position.unrealized_pnl_percent = unrealized_pnl_percent
+        if unrealized_pnl_percent > self._context.position.highest_pnl_percent:
+            self._context.position.highest_pnl_percent = unrealized_pnl_percent
+
     def check_timeout(self) -> bool:
         """Check if current state has timed out.
 
@@ -421,6 +436,10 @@ class StrategyStateMachine:
 
         elif self._context.current_state == StrategyState.PROFIT_SIGNAL:
             # Auto-return to IN_POSITION if agent doesn't respond
+            if elapsed > self._context.waiting_exit_timeout:
+                return self.transition(StateTransition.TIMEOUT)
+
+        elif self._context.current_state == StrategyState.RISK_OVERRIDE:
             if elapsed > self._context.waiting_exit_timeout:
                 return self.transition(StateTransition.TIMEOUT)
 
