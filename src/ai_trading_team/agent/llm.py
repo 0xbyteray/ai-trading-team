@@ -26,6 +26,6 @@ def create_llm(config: Config) -> Any:
         api_key=SecretStr(config.api.anthropic_api_key),
         base_url=config.api.anthropic_base_url,
         max_tokens_to_sample=4096,
-        timeout=None,
+        timeout=60.0,
         stop=None,
     )

@@ -1,5 +1,6 @@
 """Trading agent main logic."""
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -35,6 +36,7 @@ class LangChainTradingAgent:
         """
         self._config = config
         self._symbol = symbol
+        self._llm_timeout_seconds = 60.0
         self._llm = self._create_llm()
 
     def _create_llm(self) -> Any:
@@ -47,7 +49,7 @@ class LangChainTradingAgent:
             api_key=SecretStr(self._config.api.anthropic_api_key),
             base_url=self._config.api.anthropic_base_url,
             max_tokens_to_sample=2048,
-            timeout=None,
+            timeout=self._llm_timeout_seconds,
             stop=None,
         )
 
@@ -78,7 +80,10 @@ class LangChainTradingAgent:
 
         try:
             # Invoke the LLM
-            response = await self._llm.ainvoke(messages)
+            response = await asyncio.wait_for(
+                self._llm.ainvoke(messages),
+                timeout=self._llm_timeout_seconds,
+            )
             raw_content = response.content
 
             # Extract text content from response (handles thinking blocks, etc.)
@@ -116,6 +121,22 @@ class LangChainTradingAgent:
 
             return decision
 
+        except asyncio.TimeoutError:
+            latency_ms = (time.time() - start_time) * 1000
+            logger.error("Agent timeout after 60 seconds")
+            return AgentDecision(
+                signal_type=signal.signal_type.value,
+                signal_data=signal.data,
+                market_snapshot=self._snapshot_to_dict(snapshot),
+                command=AgentCommand(
+                    action=AgentAction.OBSERVE,
+                    symbol=self._symbol,
+                    reason="Agent timeout after 60 seconds. Observing for safety.",
+                ),
+                timestamp=datetime.now(),
+                model="MiniMax-M2.1",
+                latency_ms=latency_ms,
+            )
         except Exception as e:
             logger.error(f"Agent processing error: {e}")
             # Return observe command on error
@@ -519,7 +540,10 @@ class LangChainTradingAgent:
 
         try:
             # Invoke the LLM
-            response = await self._llm.ainvoke(messages)
+            response = await asyncio.wait_for(
+                self._llm.ainvoke(messages),
+                timeout=self._llm_timeout_seconds,
+            )
             raw_content = response.content
 
             # Extract text content from response (handles thinking blocks, etc.)
@@ -558,6 +582,22 @@ class LangChainTradingAgent:
 
             return decision
 
+        except asyncio.TimeoutError:
+            latency_ms = (time.time() - start_time) * 1000
+            logger.error("Profit signal timeout after 60 seconds")
+            return AgentDecision(
+                signal_type="profit_threshold",
+                signal_data=profit_data,
+                market_snapshot=self._snapshot_to_dict(snapshot),
+                command=AgentCommand(
+                    action=AgentAction.OBSERVE,
+                    symbol=self._symbol,
+                    reason="Agent timeout after 60 seconds. Observing for safety.",
+                ),
+                timestamp=datetime.now(),
+                model="MiniMax-M2.1",
+                latency_ms=latency_ms,
+            )
         except Exception as e:
             logger.error(f"Profit signal processing error: {e}")
             latency_ms = (time.time() - start_time) * 1000
