@@ -189,6 +189,7 @@ class TradingBot:
         self._last_orders_sync = 0.0
         self._orders_sync_interval = 2.0  # Seconds between open order syncs
         self._open_orders_cache: dict[str, dict[str, Any]] = {}
+        self._pending_entry_order_id: str | None = None
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -844,6 +845,9 @@ class TradingBot:
                     last_risk_check = current_time
                     await self._check_risk()
 
+                # Handle state timeouts (e.g., waiting_entry)
+                self._state_machine.check_timeout()
+
                 # Process pending signals (event-driven, not periodic)
                 if self._pending_signals:
                     signal = self._pending_signals.pop(0)
@@ -921,6 +925,29 @@ class TradingBot:
                     if payload.get("order_id")
                 }
                 self._last_orders_sync = now
+
+            # Resolve pending entry orders
+            if self._state_machine.state == StrategyState.WAITING_ENTRY:
+                if position:
+                    pos_ctx = PositionContext(
+                        symbol=self._execution_symbol,
+                        side=position.side,
+                        margin=position.margin,
+                    )
+                    self._state_machine.transition(
+                        StateTransition.AGENT_OPEN,
+                        {"position": pos_ctx},
+                    )
+                    self._pending_entry_order_id = None
+                else:
+                    pending_id = self._pending_entry_order_id
+                    open_orders = self._data_pool.get_snapshot().orders or []
+                    if pending_id and any(
+                        str(o.get("order_id") or o.get("orderId") or "") == pending_id
+                        for o in open_orders
+                    ):
+                        return
+                    # No position and no matching open order; keep waiting until timeout
         except Exception as e:
             self._logger.debug(f"Error updating position data: {e}")
 
@@ -1585,10 +1612,15 @@ class TradingBot:
                             StateTransition.AGENT_OPEN,
                             {"position": pos_ctx},
                         )
+                        self._pending_entry_order_id = None
                     else:
-                        # Position not found after successful order - treat as failed
-                        self._state_machine.transition(StateTransition.ORDER_FAILED)
+                        # Order accepted but position not visible yet; wait for fill/confirmation
+                        self._state_machine.transition(StateTransition.ORDER_PLACED)
+                        self._logger.info(
+                            "Order placed, waiting for position confirmation before marking failure"
+                        )
                 else:
+                    self._pending_entry_order_id = None
                     self._state_machine.transition(StateTransition.ORDER_FAILED)
             else:
                 self._state_machine.transition(StateTransition.AGENT_OBSERVE)
@@ -1707,6 +1739,7 @@ class TradingBot:
                         stop_loss_price=stop_loss_price,
                     )
                     self._logger.info(f"Opened position: {order.order_id}")
+                    self._pending_entry_order_id = order.order_id or None
 
                     operation = {
                         "timestamp": datetime.now().isoformat(),

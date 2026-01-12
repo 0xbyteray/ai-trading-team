@@ -42,6 +42,7 @@ class StateTransition(str, Enum):
     CONTEXT_READY = "context_ready"  # Market context gathered
     AGENT_OPEN = "agent_open"  # Agent decided to open position
     AGENT_OBSERVE = "agent_observe"  # Agent decided to observe
+    ORDER_PLACED = "order_placed"  # Order placed, awaiting fill
     ORDER_FILLED = "order_filled"  # Order executed successfully
     PROFIT_THRESHOLD = "profit_threshold"  # 10% profit increase
     AGENT_CLOSE = "agent_close"  # Agent decided to close
@@ -147,6 +148,7 @@ class StrategyStateMachine:
                 (StateTransition.CONTEXT_READY, StrategyState.WAITING_ENTRY),
                 (StateTransition.AGENT_OPEN, StrategyState.IN_POSITION),
                 (StateTransition.AGENT_OBSERVE, StrategyState.IDLE),
+                (StateTransition.ORDER_PLACED, StrategyState.WAITING_ENTRY),
                 (StateTransition.ORDER_FAILED, StrategyState.IDLE),
                 (StateTransition.TIMEOUT, StrategyState.IDLE),
             ],
