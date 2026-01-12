@@ -21,18 +21,29 @@ def _patch_websockets_headers() -> None:
 
     try:
         sig = inspect.signature(websockets.connect)
-        if "extra_headers" in sig.parameters:
-            return
+        params = sig.parameters
     except (TypeError, ValueError):
         return
 
     original_connect = websockets.connect
 
     def connect_wrapper(*args: Any, **kwargs: Any) -> Any:
-        if "extra_headers" in kwargs and "headers" not in kwargs:
-            kwargs["headers"] = kwargs.pop("extra_headers")
+        if "additional_headers" in params:
+            if "additional_headers" not in kwargs:
+                if "extra_headers" in kwargs:
+                    kwargs["additional_headers"] = kwargs.pop("extra_headers")
+                elif "headers" in kwargs:
+                    kwargs["additional_headers"] = kwargs.pop("headers")
+            kwargs.pop("extra_headers", None)
+            kwargs.pop("headers", None)
+        elif "extra_headers" in params:
+            if "extra_headers" not in kwargs and "headers" in kwargs:
+                kwargs["extra_headers"] = kwargs.pop("headers")
+            kwargs.pop("additional_headers", None)
         else:
             kwargs.pop("extra_headers", None)
+            kwargs.pop("headers", None)
+            kwargs.pop("additional_headers", None)
         return original_connect(*args, **kwargs)
 
     connect_wrapper._weex_headers_patched = True  # type: ignore[attr-defined]
