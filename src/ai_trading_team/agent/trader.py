@@ -245,6 +245,24 @@ class LangChainTradingAgent:
             logger.error(f"JSON parse error: {e}, response: {response[:500]}...")
             raise ValueError(f"Failed to parse JSON: {e}") from e
 
+        def _parse_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                raw = value.strip().lower()
+                if raw in {"", "none", "null", "n/a", "na", "market"}:
+                    return None
+                try:
+                    return float(raw)
+                except ValueError:
+                    return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         # Parse action
         action_str = data.get("action", "observe").lower()
         try:
@@ -272,10 +290,10 @@ class LangChainTradingAgent:
             action=action,
             symbol=data.get("symbol", self._symbol),
             side=side,
-            size=float(data["size"]) if data.get("size") else None,
-            price=float(data["price"]) if data.get("price") else None,
+            size=_parse_float(data.get("size")),
+            price=_parse_float(data.get("price")),
             order_type=order_type,
-            stop_loss_price=float(data["stop_loss_price"]) if data.get("stop_loss_price") else None,
+            stop_loss_price=_parse_float(data.get("stop_loss_price")),
             reason=data.get("reason", "No reason provided"),
         )
 

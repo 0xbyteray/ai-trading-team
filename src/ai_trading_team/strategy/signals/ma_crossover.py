@@ -103,14 +103,15 @@ class MACrossoverSignal(SignalSource):
 
         ma_value = sum(valid_closes) / len(valid_closes)
 
-        # Get current price
-        ticker = snapshot.ticker
-        if not ticker:
-            return None
-
-        current_price = float(ticker.get("last_price", 0))
+        # Use timeframe kline close to avoid intra-candle noise; fallback to ticker
+        current_price = float(klines[-1].get("close", 0))
         if current_price == 0:
-            return None
+            ticker = snapshot.ticker
+            if not ticker:
+                return None
+            current_price = float(ticker.get("last_price", 0))
+            if current_price == 0:
+                return None
 
         # Calculate distance from MA
         distance_percent = ((current_price - ma_value) / ma_value) * 100
