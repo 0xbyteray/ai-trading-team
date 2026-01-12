@@ -1167,6 +1167,26 @@ class TradingBot:
                     position.side,
                 )
 
+            get_stop_loss_plans = getattr(self._executor, "get_stop_loss_plans", None)
+            if callable(get_stop_loss_plans):
+                remaining = await get_stop_loss_plans(self._execution_symbol, position.side)
+                if remaining:
+                    self._logger.warning(
+                        "Stop loss plan cancel incomplete; skipping new stop loss placement. "
+                        f"Remaining plan orders: {', '.join(remaining)}"
+                    )
+                    self._data_pool.add_operation(
+                        {
+                            "timestamp": datetime.now().isoformat(),
+                            "action": "move_stop_loss",
+                            "side": position.side.value,
+                            "stop_loss_price": stop_loss_price,
+                            "result": "failed",
+                            "error": "existing stop-loss plan orders not fully cancelled",
+                        }
+                    )
+                    return
+
             place_stop_loss_plan = getattr(self._executor, "place_stop_loss_plan", None)
             plan_order_id = None
             if callable(place_stop_loss_plan):

@@ -613,6 +613,31 @@ class WEEXExecutor:
                 cancelled += 1
         return cancelled
 
+    async def get_stop_loss_plans(self, symbol: str, side: Side | None = None) -> list[str]:
+        """List active stop-loss plan order IDs for a symbol/side."""
+        position_side = None
+        if side == Side.LONG:
+            position_side = "long"
+        elif side == Side.SHORT:
+            position_side = "short"
+
+        plans = await self.get_current_plan_orders(symbol)
+        order_ids: list[str] = []
+        for plan in plans:
+            if plan.get("symbol") and plan.get("symbol") != symbol:
+                continue
+            plan_type = str(plan.get("planType") or plan.get("plan_type") or "").lower()
+            if plan_type != "loss_plan":
+                continue
+            if position_side:
+                plan_side = str(plan.get("positionSide") or plan.get("position_side") or "").lower()
+                if plan_side and plan_side != position_side:
+                    continue
+            order_id = plan.get("orderId") or plan.get("order_id")
+            if order_id:
+                order_ids.append(str(order_id))
+        return order_ids
+
     async def place_stop_loss_plan(
         self,
         symbol: str,
