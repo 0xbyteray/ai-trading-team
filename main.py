@@ -191,6 +191,9 @@ class TradingBot:
         self._orders_sync_interval = 2.0  # Seconds between open order syncs
         self._open_orders_cache: dict[str, dict[str, Any]] = {}
         self._pending_entry_order_id: str | None = None
+        self._signal_task: asyncio.Task[None] | None = None
+        self._position_sync_interval = 1.0
+        self._last_position_sync = 0.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -1002,9 +1005,14 @@ class TradingBot:
                 self._state_machine.check_timeout()
 
                 # Process pending signals (event-driven, not periodic)
-                if self._pending_signals:
+                if self._signal_task and self._signal_task.done():
+                    with contextlib.suppress(Exception):
+                        self._signal_task.result()
+                    self._signal_task = None
+
+                if self._pending_signals and self._signal_task is None:
                     signal = self._pending_signals.pop(0)
-                    await self._process_signal(signal)
+                    self._signal_task = asyncio.create_task(self._process_signal(signal))
 
                 # Update position data periodically
                 await self._update_position_data()
@@ -1020,6 +1028,11 @@ class TradingBot:
     async def _update_position_data(self) -> None:
         """Update position data in data pool."""
         try:
+            now = asyncio.get_event_loop().time()
+            if now - self._last_position_sync < self._position_sync_interval:
+                return
+            self._last_position_sync = now
+
             position = await self._executor.get_position(self._execution_symbol)
             if position:
                 self._data_pool.update_position(

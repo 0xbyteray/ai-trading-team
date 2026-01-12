@@ -69,6 +69,7 @@ class MACrossoverSignal(SignalSource):
         )
         self._ma_period = ma_period
         self._threshold_percent = threshold_percent
+        self._last_non_at: dict[Timeframe, MAPosition] = {}
 
     def _compute_state(
         self,
@@ -154,6 +155,8 @@ class MACrossoverSignal(SignalSource):
 
         # First update - no transition
         if prev_state is None:
+            if new_state.position != MAPosition.AT:
+                self._last_non_at[timeframe] = new_state.position
             logger.debug(
                 f"[{self._name}] {timeframe.value} initialized: "
                 f"price {new_state.position.value} MA{self._ma_period} "
@@ -168,14 +171,21 @@ class MACrossoverSignal(SignalSource):
         if prev_state.position == new_state.position:
             return None
 
+        if new_state.position == MAPosition.AT:
+            return None
+
+        last_non_at = self._last_non_at.get(timeframe)
+        if last_non_at is None:
+            self._last_non_at[timeframe] = new_state.position
+            return None
+        if last_non_at == new_state.position:
+            return None
+
         # Detect crossover direction
         signal: Signal | None = None
 
         # Cross UP: was below/at, now above
-        if new_state.position == MAPosition.ABOVE and prev_state.position in (
-            MAPosition.BELOW,
-            MAPosition.AT,
-        ):
+        if new_state.position == MAPosition.ABOVE:
             signal = Signal(
                 signal_type=SignalType.MA_CROSS_UP,
                 direction=SignalDirection.BULLISH,
@@ -195,10 +205,7 @@ class MACrossoverSignal(SignalSource):
             )
 
         # Cross DOWN: was above/at, now below
-        elif new_state.position == MAPosition.BELOW and prev_state.position in (
-            MAPosition.ABOVE,
-            MAPosition.AT,
-        ):
+        elif new_state.position == MAPosition.BELOW:
             signal = Signal(
                 signal_type=SignalType.MA_CROSS_DOWN,
                 direction=SignalDirection.BEARISH,
@@ -218,6 +225,15 @@ class MACrossoverSignal(SignalSource):
             )
 
         if signal:
+            self._last_non_at[timeframe] = new_state.position
             logger.info(f"🎯 {signal.description}")
 
         return signal
+
+    def reset(self, timeframe: Timeframe | None = None) -> None:
+        """Reset state for a timeframe or all timeframes."""
+        super().reset(timeframe)
+        if timeframe:
+            self._last_non_at.pop(timeframe, None)
+        else:
+            self._last_non_at.clear()
