@@ -96,9 +96,9 @@ class StateContext:
     signal_debounce_seconds: int = 300  # 5 minutes between same signal type
 
     # Timeouts (in seconds)
-    analyzing_timeout: int = 30
+    analyzing_timeout: int = 70
     waiting_entry_timeout: int = 60
-    waiting_exit_timeout: int = 60
+    waiting_exit_timeout: int = 70
 
     # Trade counters
     trades_today: int = 0
@@ -143,10 +143,12 @@ class StrategyStateMachine:
         ] = {
             StrategyState.IDLE: [
                 (StateTransition.ENTRY_SIGNAL, StrategyState.ANALYZING),
+                (StateTransition.AGENT_OPEN, StrategyState.IN_POSITION),
             ],
             StrategyState.ANALYZING: [
                 (StateTransition.CONTEXT_READY, StrategyState.WAITING_ENTRY),
                 (StateTransition.AGENT_OPEN, StrategyState.IN_POSITION),
+                (StateTransition.ORDER_FILLED, StrategyState.IN_POSITION),
                 (StateTransition.AGENT_OBSERVE, StrategyState.IDLE),
                 (StateTransition.ORDER_PLACED, StrategyState.WAITING_ENTRY),
                 (StateTransition.ORDER_FAILED, StrategyState.IDLE),
@@ -154,6 +156,7 @@ class StrategyStateMachine:
             ],
             StrategyState.WAITING_ENTRY: [
                 (StateTransition.AGENT_OPEN, StrategyState.IN_POSITION),
+                (StateTransition.ORDER_FILLED, StrategyState.IN_POSITION),
                 (StateTransition.AGENT_OBSERVE, StrategyState.IDLE),
                 (StateTransition.ORDER_FAILED, StrategyState.IDLE),
                 (StateTransition.TIMEOUT, StrategyState.IDLE),
@@ -180,6 +183,7 @@ class StrategyStateMachine:
             ],
             StrategyState.COOLDOWN: [
                 (StateTransition.COOLDOWN_EXPIRED, StrategyState.IDLE),
+                (StateTransition.AGENT_OPEN, StrategyState.IN_POSITION),
             ],
             StrategyState.ERROR: [
                 (StateTransition.RESET, StrategyState.IDLE),

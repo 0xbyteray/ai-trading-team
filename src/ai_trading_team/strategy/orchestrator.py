@@ -646,7 +646,9 @@ class StrategyOrchestrator:
                 return self._state_machine.transition(StateTransition.AGENT_HOLD)
 
         elif current_state == StrategyState.WAITING_EXIT and decision == "close":
-            return self._state_machine.transition(StateTransition.AGENT_CLOSE)
+            if self._state_machine.can_transition(StateTransition.AGENT_CLOSE):
+                return self._state_machine.transition(StateTransition.AGENT_CLOSE)
+            return False
 
         return False
 
