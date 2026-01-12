@@ -178,69 +178,72 @@ class RSIExtremeSignal(SignalSource):
         if not isinstance(prev_state, RSIState):
             return None
 
-        # No zone change
+        prev_rsi = prev_state.rsi_value
+        current_rsi = new_state.rsi_value
+
+        # No meaningful change around thresholds
         if prev_state.zone == new_state.zone:
             return None
 
         signal: Signal | None = None
 
         # Entering oversold
-        if new_state.zone == RSIZone.OVERSOLD and prev_state.zone != RSIZone.OVERSOLD:
+        if prev_rsi >= self._oversold and current_rsi < self._oversold:
             signal = Signal(
                 signal_type=SignalType.RSI_ENTER_OVERSOLD,
                 direction=SignalDirection.NEUTRAL,  # Just entering, not actionable yet
                 strength=SignalStrength.WEAK,
                 timeframe=timeframe,
                 source=self._name,
-                data={"rsi": new_state.rsi_value, "threshold": self._oversold},
+                data={"rsi": current_rsi, "prev_rsi": prev_rsi, "threshold": self._oversold},
                 description=(
                     f"RSI entered OVERSOLD zone on {timeframe.value}: "
-                    f"RSI={new_state.rsi_value:.1f} < {self._oversold}"
+                    f"RSI {prev_rsi:.1f} -> {current_rsi:.1f} < {self._oversold}"
                 ),
             )
 
         # Exiting oversold (BULLISH signal)
-        elif prev_state.zone == RSIZone.OVERSOLD and new_state.zone == RSIZone.NORMAL:
+        elif prev_rsi <= self._oversold and current_rsi > self._oversold:
             signal = Signal(
                 signal_type=SignalType.RSI_EXIT_OVERSOLD,
                 direction=SignalDirection.BULLISH,
                 strength=SignalStrength.MODERATE,
                 timeframe=timeframe,
                 source=self._name,
-                data={"rsi": new_state.rsi_value, "prev_rsi": prev_state.rsi_value},
+                data={"rsi": current_rsi, "prev_rsi": prev_rsi},
                 description=(
                     f"RSI exited OVERSOLD zone on {timeframe.value}: "
-                    f"RSI={new_state.rsi_value:.1f} (bullish momentum)"
+                    f"RSI {prev_rsi:.1f} -> {current_rsi:.1f} (bullish momentum)"
                 ),
             )
 
         # Entering overbought
-        elif new_state.zone == RSIZone.OVERBOUGHT and prev_state.zone != RSIZone.OVERBOUGHT:
+        elif prev_rsi <= self._overbought and current_rsi > self._overbought:
             signal = Signal(
                 signal_type=SignalType.RSI_ENTER_OVERBOUGHT,
                 direction=SignalDirection.NEUTRAL,
                 strength=SignalStrength.WEAK,
                 timeframe=timeframe,
                 source=self._name,
-                data={"rsi": new_state.rsi_value, "threshold": self._overbought},
+                data={"rsi": current_rsi, "prev_rsi": prev_rsi, "threshold": self._overbought},
                 description=(
                     f"RSI entered OVERBOUGHT zone on {timeframe.value}: "
-                    f"RSI={new_state.rsi_value:.1f} > {self._overbought}"
+                    f"RSI {prev_rsi:.1f} -> {current_rsi:.1f} > {self._overbought}"
                 ),
             )
 
         # Exiting overbought (BEARISH signal)
-        elif prev_state.zone == RSIZone.OVERBOUGHT and new_state.zone == RSIZone.NORMAL:
+        elif prev_rsi >= self._overbought and current_rsi < self._overbought:
             signal = Signal(
                 signal_type=SignalType.RSI_EXIT_OVERBOUGHT,
                 direction=SignalDirection.BEARISH,
                 strength=SignalStrength.MODERATE,
                 timeframe=timeframe,
                 source=self._name,
-                data={"rsi": new_state.rsi_value, "prev_rsi": prev_state.rsi_value},
+                data={"rsi": current_rsi, "prev_rsi": prev_rsi},
                 description=(
                     f"RSI exited OVERBOUGHT zone on {timeframe.value}: "
-                    f"RSI={new_state.rsi_value:.1f} (bearish momentum)"
+                    f"RSI {prev_rsi:.1f} -> {current_rsi:.1f} (bearish momentum)"
                 ),
             )
 
