@@ -126,6 +126,17 @@ class WEEXExecutor:
                 return collateral
         return []
 
+    def _extract_list(self, response: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+        payload = self._unwrap_payload(response)
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
     def _asset_coin(self, asset: dict[str, Any]) -> str:
         coin = asset.get("coinName") or asset.get("coin") or ""
         return str(coin).upper()
@@ -180,54 +191,65 @@ class WEEXExecutor:
     async def get_position(self, symbol: str) -> Position | None:
         """Get position for a symbol."""
         client = self._ensure_connected()
-        data = await client.account.get_single_position(symbol)
+        response = await client.account.get_single_position(symbol)
+        data = self._unwrap_payload(response)
+        if isinstance(data, list):
+            data = data[0] if data else None
 
-        if not data:
+        if not isinstance(data, dict):
             return None
 
         # WEEX returns position data
-        size = Decimal(str(data.get("total", 0)))
+        size = self._decimal_or_zero(data.get("total"))
         if size == 0:
             return None
 
-        side_str = data.get("holdSide", "long")
+        side_str = data.get("holdSide", data.get("side", "long"))
         side = Side.LONG if side_str.lower() == "long" else Side.SHORT
+
+        unrealized_raw = data.get("unrealisedPL")
+        if unrealized_raw is None:
+            unrealized_raw = data.get("unrealizedPL")
 
         return Position(
             symbol=symbol,
             side=side,
             size=size,
-            entry_price=Decimal(str(data.get("averageOpenPrice", 0))),
-            leverage=int(data.get("leverage", 1)),
-            unrealized_pnl=Decimal(str(data.get("unrealisedPL", 0))),
-            realized_pnl=Decimal(str(data.get("realisedPL", 0))),
-            liquidation_price=Decimal(str(data.get("liquidationPrice", 0)))
+            entry_price=self._decimal_or_zero(data.get("averageOpenPrice")),
+            leverage=int(self._decimal_or_zero(data.get("leverage"))) or 1,
+            unrealized_pnl=self._decimal_or_zero(unrealized_raw),
+            realized_pnl=self._decimal_or_zero(data.get("realisedPL")),
+            liquidation_price=self._decimal_or_zero(data.get("liquidationPrice"))
             if data.get("liquidationPrice")
             else None,
-            margin=Decimal(str(data.get("margin", 0))),
+            margin=self._decimal_or_zero(data.get("margin")),
             status=PositionStatus.OPEN,
         )
 
     async def get_positions(self) -> list[Position]:
         """Get all open positions."""
         client = self._ensure_connected()
-        data = await client.account.get_all_positions()
+        response = await client.get("/capi/v2/account/position/allPosition")
+        data = self._extract_list(response, ("positions", "list"))
 
         positions = []
-        for item in data if isinstance(data, list) else []:
-            size = Decimal(str(item.get("total", 0)))
+        for item in data:
+            size = self._decimal_or_zero(item.get("total"))
             if size > 0:
-                side_str = item.get("holdSide", "long")
+                side_str = item.get("holdSide", item.get("side", "long"))
                 side = Side.LONG if side_str.lower() == "long" else Side.SHORT
+                unrealized_raw = item.get("unrealisedPL")
+                if unrealized_raw is None:
+                    unrealized_raw = item.get("unrealizedPL")
 
                 positions.append(
                     Position(
                         symbol=item.get("symbol", ""),
                         side=side,
                         size=size,
-                        entry_price=Decimal(str(item.get("averageOpenPrice", 0))),
-                        leverage=int(item.get("leverage", 1)),
-                        unrealized_pnl=Decimal(str(item.get("unrealisedPL", 0))),
+                        entry_price=self._decimal_or_zero(item.get("averageOpenPrice")),
+                        leverage=int(self._decimal_or_zero(item.get("leverage"))) or 1,
+                        unrealized_pnl=self._decimal_or_zero(unrealized_raw),
                         status=PositionStatus.OPEN,
                     )
                 )
@@ -348,10 +370,11 @@ class WEEXExecutor:
         """Get all open orders for a symbol."""
         client = self._ensure_connected()
 
-        data = await client.trade.get_current_orders(symbol=symbol)
+        response = await client.get("/capi/v2/order/current", params={"symbol": symbol})
+        data = self._extract_list(response, ("orders", "list"))
         orders = []
 
-        for item in data if isinstance(data, list) else []:
+        for item in data:
             side_str = item.get("side", "1")
             side = Side.LONG if side_str in ("1", "3") else Side.SHORT
 
@@ -360,11 +383,11 @@ class WEEXExecutor:
                     symbol=symbol,
                     side=side,
                     order_type=OrderType.LIMIT,
-                    size=Decimal(str(item.get("size", 0))),
-                    price=Decimal(str(item.get("price", 0))),
+                    size=self._decimal_or_zero(item.get("size")),
+                    price=self._decimal_or_zero(item.get("price")),
                     status=OrderStatus.NEW,
                     order_id=str(item.get("orderId", "")),
-                    filled_size=Decimal(str(item.get("filledSize", 0))),
+                    filled_size=self._decimal_or_zero(item.get("filledSize")),
                 )
             )
 

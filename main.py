@@ -35,6 +35,7 @@ from ai_trading_team.data.manager import BinanceDataManager
 from ai_trading_team.execution.binance.executor import BinanceExecutor
 from ai_trading_team.execution.mock_executor import MockExecutor
 from ai_trading_team.execution.weex.executor import WEEXExecutor
+from ai_trading_team.execution.weex.stream import WEEXPrivateStream
 from ai_trading_team.logging import setup_logging
 from ai_trading_team.risk.monitor import RiskMonitor
 from ai_trading_team.risk.rules import DynamicTakeProfitRule, ForceStopLossRule, TrailingStopRule
@@ -166,6 +167,15 @@ class TradingBot:
                     config.api.binance_api_secret,
                 )
 
+        # WEEX private WebSocket stream for real-time account/position/order updates
+        self._weex_stream: WEEXPrivateStream | None = None
+        if not config.trading.dry_run and self._exchange == "weex":
+            self._weex_stream = WEEXPrivateStream(
+                config.api.weex_api_key,
+                config.api.weex_api_secret,
+                config.api.weex_passphrase,
+            )
+
         # Risk monitor with strategy-specific rules
         self._risk_monitor = RiskMonitor(self._data_pool, self._executor)
         self._setup_risk_rules()
@@ -176,6 +186,9 @@ class TradingBot:
         # State saving interval
         self._last_state_save = 0.0
         self._state_save_interval = 30.0  # Save every 30 seconds
+        self._last_orders_sync = 0.0
+        self._orders_sync_interval = 2.0  # Seconds between open order syncs
+        self._open_orders_cache: dict[str, dict[str, Any]] = {}
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -267,6 +280,167 @@ class TradingBot:
         if self._tui_app:
             self._tui_app.add_risk_event(event_type, message)
 
+    def _safe_float(self, value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_ws_items(
+        self,
+        message: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(message, dict):
+            return []
+
+        data = message.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in keys:
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+
+        msg = message.get("msg")
+        if isinstance(msg, dict):
+            msg_data = msg.get("data")
+            if isinstance(msg_data, list):
+                return msg_data
+            if isinstance(msg_data, dict):
+                for key in keys:
+                    value = msg_data.get(key)
+                    if isinstance(value, list):
+                        return value
+
+        return []
+
+    async def _handle_weex_account_ws(self, message: dict[str, Any]) -> None:
+        items = self._extract_ws_items(message, ("account", "accounts", "collateral"))
+        if not items:
+            return
+
+        for item in items:
+            coin = str(item.get("coinId") or item.get("coin") or "").upper()
+            if coin and coin != "USDT":
+                continue
+            amount = self._safe_float(item.get("amount"))
+            if amount is None:
+                continue
+
+            snapshot = self._data_pool.get_snapshot().account or {}
+            self._data_pool.update_account(
+                {
+                    "balance": amount,
+                    "available": snapshot.get("available", amount),
+                    "margin": snapshot.get("margin", 0.0),
+                }
+            )
+            break
+
+    async def _handle_weex_position_ws(self, message: dict[str, Any]) -> None:
+        items = self._extract_ws_items(message, ("position", "positions"))
+        if not items:
+            return
+
+        snapshot = self._data_pool.get_snapshot().position or {}
+
+        for item in items:
+            contract_id = item.get("contractId") or item.get("symbol")
+            if contract_id and contract_id != self._execution_symbol:
+                continue
+
+            size = self._safe_float(item.get("size")) or 0.0
+            if size == 0:
+                self._data_pool.update_position(None)
+                return
+
+            side_raw = str(item.get("side", "")).lower()
+            side = side_raw if side_raw in ("long", "short") else snapshot.get("side", "long")
+
+            open_value = self._safe_float(item.get("openValue"))
+            entry_price = snapshot.get("entry_price", 0.0)
+            if open_value and size:
+                entry_price = open_value / size
+
+            margin = self._safe_float(item.get("isolatedMargin"))
+            if margin is None:
+                margin = snapshot.get("margin", 0.0)
+
+            leverage_raw = self._safe_float(item.get("leverage"))
+            leverage = (
+                int(leverage_raw)
+                if leverage_raw is not None and leverage_raw > 0
+                else int(snapshot.get("leverage", self._config.trading.leverage))
+            )
+
+            self._data_pool.update_position(
+                {
+                    "symbol": self._execution_symbol,
+                    "side": side,
+                    "size": size,
+                    "entry_price": entry_price,
+                    "unrealized_pnl": snapshot.get("unrealized_pnl", 0.0),
+                    "margin": margin,
+                    "leverage": leverage,
+                }
+            )
+            return
+
+    async def _handle_weex_orders_ws(self, message: dict[str, Any]) -> None:
+        items = self._extract_ws_items(message, ("order", "orders"))
+        if not items:
+            return
+
+        for item in items:
+            contract_id = item.get("contractId") or item.get("symbol")
+            if contract_id and contract_id != self._execution_symbol:
+                continue
+
+            order_id = str(item.get("id") or item.get("orderId") or "")
+            if not order_id:
+                continue
+
+            status_raw = str(item.get("status", "")).upper()
+            if status_raw in {"FILLED", "CANCELED", "CANCELLED"}:
+                self._open_orders_cache.pop(order_id, None)
+                continue
+
+            side_raw = str(item.get("orderSide") or item.get("side") or "").upper()
+            side = "long" if side_raw in {"BUY", "LONG"} else "short" if side_raw in {"SELL", "SHORT"} else ""
+
+            self._open_orders_cache[order_id] = {
+                "order_id": order_id,
+                "orderId": order_id,
+                "symbol": self._execution_symbol,
+                "side": side,
+                "price": self._safe_float(item.get("price")),
+                "size": self._safe_float(item.get("size")) or 0.0,
+                "quantity": self._safe_float(item.get("size")) or 0.0,
+                "filled_size": self._safe_float(item.get("cumFillSize") or item.get("filledSize")) or 0.0,
+                "status": str(item.get("status", "OPEN")).lower(),
+                "order_type": str(item.get("type", "LIMIT")).lower(),
+            }
+
+        self._data_pool.update_orders(list(self._open_orders_cache.values()))
+
+    async def _start_weex_stream(self) -> None:
+        if not self._weex_stream:
+            return
+        try:
+            await self._weex_stream.connect()
+            await self._weex_stream.subscribe_account(self._handle_weex_account_ws)
+            await self._weex_stream.subscribe_positions(self._handle_weex_position_ws)
+            await self._weex_stream.subscribe_orders(self._handle_weex_orders_ws)
+            self._logger.info("WEEX private WebSocket subscriptions active")
+        except Exception as e:
+            self._logger.warning(f"WEEX WebSocket unavailable, fallback to REST: {e}")
+
+    async def _stop_weex_stream(self) -> None:
+        if self._weex_stream and self._weex_stream.is_connected:
+            await self._weex_stream.disconnect()
+
     async def start(self) -> None:
         """Start the trading bot with state recovery support."""
         self._logger.info("=" * 60)
@@ -295,6 +469,9 @@ class TradingBot:
                 self._logger.info("Mock executor connected")
             else:
                 self._logger.info(f"Connected to {self._executor.name}")
+
+            if self._weex_stream:
+                await self._start_weex_stream()
 
             # Set leverage
             await self._executor.set_leverage(
@@ -717,6 +894,33 @@ class TradingBot:
                 current_equity=float(account.total_equity),
                 unrealized_pnl=unrealized,
             )
+
+            now = asyncio.get_event_loop().time()
+            if now - self._last_orders_sync >= self._orders_sync_interval:
+                orders = await self._executor.get_open_orders(self._execution_symbol)
+                orders_payload = []
+                for order in orders:
+                    orders_payload.append(
+                        {
+                            "order_id": order.order_id,
+                            "orderId": order.order_id,
+                            "symbol": order.symbol,
+                            "side": order.side.value,
+                            "price": float(order.price) if order.price is not None else None,
+                            "size": float(order.size),
+                            "quantity": float(order.size),
+                            "filled_size": float(order.filled_size),
+                            "status": order.status.value,
+                            "order_type": order.order_type.value,
+                        }
+                    )
+                self._data_pool.update_orders(orders_payload)
+                self._open_orders_cache = {
+                    payload["order_id"]: payload
+                    for payload in orders_payload
+                    if payload.get("order_id")
+                }
+                self._last_orders_sync = now
         except Exception as e:
             self._logger.debug(f"Error updating position data: {e}")
 
@@ -1586,6 +1790,8 @@ class TradingBot:
 
         # Stop data collection
         await self._data_manager.stop()
+
+        await self._stop_weex_stream()
 
         # Disconnect from executor
         await self._executor.disconnect()
