@@ -1405,7 +1405,14 @@ class TradingBot:
 
             # Only process actionable signals
             if not signal.is_actionable:
-                self._logger.debug(f"Signal not actionable: {signal.signal_type.value}")
+                self._logger.info(
+                    f"Signal not actionable; AI not invoked: {signal.signal_type.value}"
+                )
+                self._notify_agent_log(
+                    "SKIP",
+                    "Signal not actionable",
+                    signal.signal_type.value,
+                )
                 return
 
             # Check if we should process this signal based on current state
@@ -1417,7 +1424,15 @@ class TradingBot:
                 await self._process_position_signal(signal)
             else:
                 # Other states (ANALYZING, WAITING_ENTRY, etc.): skip
-                self._logger.debug(f"Busy state, skipping signal: {signal.signal_type.value}")
+                self._logger.info(
+                    f"Busy state ({self._state_machine.state.value}); "
+                    f"AI not invoked for signal {signal.signal_type.value}"
+                )
+                self._notify_agent_log(
+                    "SKIP",
+                    f"State={self._state_machine.state.value}",
+                    signal.signal_type.value,
+                )
         except Exception as e:
             self._logger.error(f"Error processing signal {signal.signal_type.value}: {e}")
 
