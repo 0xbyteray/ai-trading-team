@@ -1203,28 +1203,48 @@ class TradingBot:
                     f"{plan_order_id} (cancelled {cancelled_count} stop orders, "
                     f"{plan_cancelled} plan orders)"
                 )
+
+                # Update position context only after successful placement
+                if self._state_machine._context.position:
+                    self._state_machine._context.position.stop_loss_price = stop_loss_price
+
+                self._notify_agent_log(
+                    "STOP_LOSS",
+                    f"Target moved to {stop_loss_price:.4f}",
+                    "Placed",
+                )
+
+                self._data_pool.add_operation(
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "move_stop_loss",
+                        "side": position.side.value,
+                        "stop_loss_price": stop_loss_price,
+                        "result": "success",
+                        "order_id": plan_order_id,
+                    }
+                )
             else:
                 self._logger.warning(
                     f"Stop loss move requested to {stop_loss_price:.4f}. "
                     f"Cancelled {cancelled_count} stop orders and {plan_cancelled} plan orders."
                 )
 
-            # Update position context with new stop loss target for AI reference
-            if self._state_machine._context.position:
-                self._state_machine._context.position.stop_loss_price = stop_loss_price
-
-            self._notify_agent_log("STOP_LOSS", f"Target moved to {stop_loss_price:.4f}", "Logged")
-
-            self._data_pool.add_operation(
-                {
-                    "timestamp": datetime.now().isoformat(),
-                    "action": "move_stop_loss",
-                    "side": position.side.value,
-                    "stop_loss_price": stop_loss_price,
-                    "result": "success" if plan_order_id else "logged",
-                    "order_id": plan_order_id,
-                }
-            )
+                self._notify_agent_log(
+                    "STOP_LOSS",
+                    f"Target move failed at {stop_loss_price:.4f}",
+                    "Not placed",
+                )
+                self._data_pool.add_operation(
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "move_stop_loss",
+                        "side": position.side.value,
+                        "stop_loss_price": stop_loss_price,
+                        "result": "failed",
+                        "error": "plan order not placed",
+                    }
+                )
 
         except Exception as e:
             self._logger.error(f"Failed to move stop loss: {e}")
