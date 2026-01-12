@@ -26,7 +26,7 @@ class TradingConfig:
 
     symbol: str = "BTCUSDT"
     exchange: str = "weex"
-    leverage: int = 75  # Default 75x leverage
+    leverage: int = 20  # Default 20x leverage (competition limit)
     max_position_percent: float = 75.0  # Max 75% of available balance for positions
     dry_run: bool = False  # Simulate trades without real execution
 
@@ -63,10 +63,13 @@ class Config:
             weex_passphrase=os.getenv("WEEX_PASSPHRASE", ""),
         )
 
+        leverage_raw = int(os.getenv("TRADING_LEVERAGE", "20"))
+        leverage = min(max(leverage_raw, 1), 20)
+
         trading = TradingConfig(
             symbol=os.getenv("TRADING_SYMBOL", "BTCUSDT"),
             exchange=os.getenv("TRADING_EXCHANGE", "weex").strip().lower(),
-            leverage=int(os.getenv("TRADING_LEVERAGE", "75")),
+            leverage=leverage,
             max_position_percent=float(os.getenv("TRADING_MAX_POSITION_PERCENT", "75.0")),
             dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         )
