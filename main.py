@@ -192,8 +192,14 @@ class TradingBot:
         self._open_orders_cache: dict[str, dict[str, Any]] = {}
         self._pending_entry_order_id: str | None = None
         self._signal_task: asyncio.Task[None] | None = None
-        self._position_sync_interval = 1.0
+        self._position_sync_interval = 5.0
         self._last_position_sync = 0.0
+        self._last_ws_position_update = 0.0
+        self._last_ws_account_update = 0.0
+        self._last_ws_orders_update = 0.0
+        self._ws_position_ttl = 12.0
+        self._ws_account_ttl = 12.0
+        self._ws_orders_ttl = 8.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -276,7 +282,7 @@ class TradingBot:
         elif side_raw == "short":
             side = Side.SHORT
         else:
-            side = Side.LONG
+            return None
 
         entry_price = self._to_decimal(position.get("entry_price"))
         margin = self._to_decimal(position.get("margin"))
@@ -484,6 +490,7 @@ class TradingBot:
                     "margin": snapshot.get("margin", 0.0),
                 }
             )
+            self._last_ws_account_update = asyncio.get_event_loop().time()
             break
 
     async def _handle_weex_position_ws(self, message: dict[str, Any]) -> None:
@@ -515,6 +522,10 @@ class TradingBot:
             entry_price = snapshot.get("entry_price", 0.0)
             if open_value and size:
                 entry_price = open_value / size
+            else:
+                ws_entry = self._safe_float(item.get("openPrice") or item.get("open_price"))
+                if ws_entry is not None:
+                    entry_price = ws_entry
 
             margin = self._safe_float(
                 item.get("isolatedMargin")
@@ -532,17 +543,27 @@ class TradingBot:
                 else int(snapshot.get("leverage", self._config.trading.leverage))
             )
 
+            unrealized = self._safe_float(
+                item.get("unrealizePnl")
+                or item.get("unrealisedPnl")
+                or item.get("unrealizedPnl")
+                or item.get("unrealizedPnL")
+            )
+            if unrealized is None:
+                unrealized = snapshot.get("unrealized_pnl", 0.0)
+
             self._data_pool.update_position(
                 {
                     "symbol": self._execution_symbol,
                     "side": side,
                     "size": size,
                     "entry_price": entry_price,
-                    "unrealized_pnl": snapshot.get("unrealized_pnl", 0.0),
+                    "unrealized_pnl": unrealized,
                     "margin": margin,
                     "leverage": leverage,
                 }
             )
+            self._last_ws_position_update = asyncio.get_event_loop().time()
             return
 
     async def _handle_weex_orders_ws(self, message: dict[str, Any]) -> None:
@@ -581,6 +602,7 @@ class TradingBot:
             }
 
         self._data_pool.update_orders(list(self._open_orders_cache.values()))
+        self._last_ws_orders_update = asyncio.get_event_loop().time()
 
     async def _start_weex_stream(self) -> None:
         if not self._weex_stream:
@@ -989,7 +1011,7 @@ class TradingBot:
 
     async def _run_loop(self) -> None:
         """Main trading loop."""
-        risk_check_interval = 1.0  # Check risk every 1 second
+        risk_check_interval = 5.0  # Check risk every 5 seconds to reduce REST pressure
         last_risk_check = 0.0
 
         while self._running:
@@ -1033,6 +1055,23 @@ class TradingBot:
                 return
             self._last_position_sync = now
 
+            snapshot = self._data_pool.get_snapshot()
+            ws_position_recent = (
+                self._weex_stream
+                and self._weex_stream.is_connected
+                and (now - self._last_ws_position_update) < self._ws_position_ttl
+            )
+            ws_account_recent = (
+                self._weex_stream
+                and self._weex_stream.is_connected
+                and (now - self._last_ws_account_update) < self._ws_account_ttl
+            )
+            ws_orders_recent = (
+                self._weex_stream
+                and self._weex_stream.is_connected
+                and (now - self._last_ws_orders_update) < self._ws_orders_ttl
+            )
+
             position = await self._executor.get_position(self._execution_symbol)
             if position:
                 self._data_pool.update_position(
@@ -1046,18 +1085,37 @@ class TradingBot:
                         "leverage": position.leverage,
                     }
                 )
-            else:
+            elif ws_position_recent and snapshot.position:
+                self._logger.debug("Keeping WS position snapshot; REST returned empty")
+            elif not ws_position_recent:
                 self._data_pool.update_position(None)
 
             account = await self._executor.get_account()
             margin_value = float(account.used_margin)
-            if margin_value <= 0 and position:
-                margin_value = float(position.margin) if position.margin else 0.0
-                if margin_value <= 0:
-                    leverage = position.leverage or self._config.trading.leverage or 1
-                    entry_price = float(position.entry_price) if position.entry_price else 0.0
-                    if entry_price > 0:
-                        margin_value = (float(position.size) * entry_price) / max(leverage, 1)
+            if margin_value <= 0:
+                source_position: Position | None = position
+                snapshot_position = snapshot.position if ws_position_recent else None
+                if not source_position and snapshot_position:
+                    margin_value = self._safe_float(snapshot_position.get("margin")) or 0.0
+                    if margin_value <= 0:
+                        leverage = (
+                            int(snapshot_position.get("leverage") or self._config.trading.leverage)
+                        )
+                        entry_price = self._safe_float(snapshot_position.get("entry_price")) or 0.0
+                        size = self._safe_float(snapshot_position.get("size")) or 0.0
+                        if entry_price > 0 and size > 0 and leverage > 0:
+                            margin_value = (size * entry_price) / max(leverage, 1)
+                elif source_position:
+                    margin_value = float(source_position.margin) if source_position.margin else 0.0
+                    if margin_value <= 0:
+                        leverage = source_position.leverage or self._config.trading.leverage or 1
+                        entry_price = (
+                            float(source_position.entry_price) if source_position.entry_price else 0.0
+                        )
+                        if entry_price > 0:
+                            margin_value = (
+                                float(source_position.size) * entry_price
+                            ) / max(leverage, 1)
             self._data_pool.update_account(
                 {
                     "balance": float(account.total_equity),
@@ -1065,19 +1123,31 @@ class TradingBot:
                     "margin": margin_value,
                 }
             )
+            if not ws_account_recent:
+                self._last_ws_account_update = 0.0
 
             if position:
                 self._sync_state_with_position(position)
+            elif ws_position_recent and snapshot.position and not self._state_machine.has_position:
+                pos_ctx = self._position_context_from_snapshot(snapshot.position)
+                if pos_ctx:
+                    self._logger.info("Syncing state from WS position snapshot")
+                    self._state_machine.transition(StateTransition.AGENT_OPEN, {"position": pos_ctx})
 
             # Update trading statistics with current equity
-            unrealized = float(position.unrealized_pnl) if position else 0.0
+            if position:
+                unrealized = float(position.unrealized_pnl)
+            elif ws_position_recent and snapshot.position:
+                unrealized = self._safe_float(snapshot.position.get("unrealized_pnl")) or 0.0
+            else:
+                unrealized = 0.0
             self._data_pool.update_equity(
                 current_equity=float(account.total_equity),
                 unrealized_pnl=unrealized,
             )
 
             now = asyncio.get_event_loop().time()
-            if now - self._last_orders_sync >= self._orders_sync_interval:
+            if not ws_orders_recent and now - self._last_orders_sync >= self._orders_sync_interval:
                 orders = await self._executor.get_open_orders(self._execution_symbol)
                 orders_payload = []
                 for order in orders:
@@ -1349,6 +1419,9 @@ class TradingBot:
                     self._logger.critical(f"FORCE CLOSING POSITION: {action.reason}")
                     self._notify_risk_event("STOP_LOSS", f"Force close: {action.reason}")
 
+                    if self._state_machine.can_transition(StateTransition.RISK_TRIGGERED):
+                        self._state_machine.transition(StateTransition.RISK_TRIGGERED)
+
                     position = await self._executor.get_position(self._execution_symbol)
                     if position:
                         # Capture position info before closing for trade recording
@@ -1462,7 +1535,9 @@ class TradingBot:
         # Get current position
         position = await self._executor.get_position(self._execution_symbol)
         if not position:
-            self._logger.debug("No position found, skipping position signal")
+            self._logger.info(
+                f"No position found; skipping signal {signal.signal_type.value}"
+            )
             return
 
         # Determine if signal is opposite to current position
@@ -1476,20 +1551,20 @@ class TradingBot:
 
         # Only process strong opposite signals (weak signals are noise)
         if not is_opposite_signal:
-            self._logger.debug(
-                f"Same direction signal while in position, skipping: {signal.signal_type.value}"
+            self._logger.info(
+                f"Same-direction signal while in position; skipping AI: {signal.signal_type.value}"
             )
             return
 
         if signal.strength == SignalStrength.WEAK:
-            self._logger.debug(
-                f"Weak opposite signal while in position, skipping: {signal.signal_type.value}"
+            self._logger.info(
+                f"Weak opposite signal; skipping AI: {signal.signal_type.value}"
             )
             return
 
         # Check debounce to avoid repeated signals
         if self._state_machine.should_debounce_signal(signal.signal_type.value):
-            self._logger.debug(f"Signal debounced: {signal.signal_type.value}")
+            self._logger.info(f"Signal debounced; skipping AI: {signal.signal_type.value}")
             return
 
         self._logger.info(
@@ -1554,26 +1629,32 @@ class TradingBot:
             decision.command.reason[:60],
         )
 
-        # Upload AI decision log (always when agent returns a decision)
-        try:
-            await self._executor.upload_ai_log(
-                stage="Opposite Signal Processing",
-                model=decision.model,
-                input_data={
-                    "signal_type": signal.signal_type.value,
-                    "signal_data": signal.data,
-                    "context": "opposite_signal_while_in_position",
-                    "position_side": position.side.value,
-                    "position_pnl": float(position.unrealized_pnl),
-                },
-                output={
-                    "action": decision.command.action.value,
-                    "reason": decision.command.reason,
-                },
-                explanation=decision.command.reason,
-            )
-        except Exception as e:
-            self._logger.warning(f"Failed to upload AI log: {e}")
+        # Upload AI log only for non-execution actions (execution logs are uploaded after orders)
+        if decision.command.action not in (
+            AgentAction.OPEN,
+            AgentAction.ADD,
+            AgentAction.REDUCE,
+            AgentAction.CLOSE,
+        ):
+            try:
+                await self._executor.upload_ai_log(
+                    stage="Opposite Signal Processing",
+                    model=decision.model,
+                    input_data={
+                        "signal_type": signal.signal_type.value,
+                        "signal_data": signal.data,
+                        "context": "opposite_signal_while_in_position",
+                        "position_side": position.side.value,
+                        "position_pnl": float(position.unrealized_pnl),
+                    },
+                    output={
+                        "action": decision.command.action.value,
+                        "reason": decision.command.reason,
+                    },
+                    explanation=decision.command.reason,
+                )
+            except Exception as e:
+                self._logger.warning(f"Failed to upload AI log: {e}")
 
         # Handle agent decision
         if decision.command.action == AgentAction.CLOSE:
@@ -1598,6 +1679,9 @@ class TradingBot:
             decision: Agent decision
         """
         try:
+            if self._state_machine.can_transition(StateTransition.AGENT_CLOSE):
+                self._state_machine.transition(StateTransition.AGENT_CLOSE)
+
             # Capture position info before closing for trade recording
             entry_price = float(position.entry_price)
             exit_price = self._get_current_price()
@@ -1877,25 +1961,31 @@ class TradingBot:
             decision.command.reason[:60],
         )
 
-        # Upload AI log (always when agent returns a decision)
-        try:
-            await self._executor.upload_ai_log(
-                stage="Signal Processing",
-                model=decision.model,
-                input_data={
-                    "signal_type": signal.signal_type.value,
-                    "signal_data": signal.data,
-                    "market_snapshot": decision.market_snapshot,
-                },
-                output={
-                    "action": decision.command.action.value,
-                    "side": decision.command.side.value if decision.command.side else None,
-                    "size": decision.command.size,
-                },
-                explanation=decision.command.reason,
-            )
-        except Exception as e:
-            self._logger.warning(f"Failed to upload AI log: {e}")
+        should_upload_decision_log = True
+        if decision.command.action in (AgentAction.OPEN, AgentAction.ADD):
+            if decision.command.is_actionable():
+                should_upload_decision_log = False
+
+        # Upload AI log only for non-execution actions (execution logs are uploaded after orders)
+        if should_upload_decision_log:
+            try:
+                await self._executor.upload_ai_log(
+                    stage="Signal Processing",
+                    model=decision.model,
+                    input_data={
+                        "signal_type": signal.signal_type.value,
+                        "signal_data": signal.data,
+                        "market_snapshot": decision.market_snapshot,
+                    },
+                    output={
+                        "action": decision.command.action.value,
+                        "side": decision.command.side.value if decision.command.side else None,
+                        "size": decision.command.size,
+                    },
+                    explanation=decision.command.reason,
+                )
+            except Exception as e:
+                self._logger.warning(f"Failed to upload AI log: {e}")
 
         # Handle agent decision
         if decision.command.action == AgentAction.OBSERVE:
@@ -2098,6 +2188,9 @@ class TradingBot:
                     return True
 
             elif command.action == AgentAction.CLOSE and command.side:
+                if self._state_machine.can_transition(StateTransition.AGENT_CLOSE):
+                    self._state_machine.transition(StateTransition.AGENT_CLOSE)
+
                 # Get position info before closing for trade recording
                 position = await self._executor.get_position(self._execution_symbol)
                 entry_price = float(position.entry_price) if position else 0.0

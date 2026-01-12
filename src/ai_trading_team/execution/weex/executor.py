@@ -242,6 +242,7 @@ class WEEXExecutor:
             data,
             (
                 "unrealisedPL",
+                "unrealisedPnl",
                 "unrealizedPL",
                 "unrealizedPnl",
                 "unrealisePnl",

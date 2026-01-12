@@ -372,12 +372,42 @@ class LangChainTradingAgent:
         position_str = "无持仓"
         if snapshot.position:
             pos = snapshot.position
+            pnl_value = pos.get("unrealized_pnl")
+            try:
+                pnl_numeric = float(pnl_value) if pnl_value is not None else None
+            except (TypeError, ValueError):
+                pnl_numeric = None
+
+            if pnl_numeric is None or abs(pnl_numeric) < 1e-12:
+                current_price = None
+                if snapshot.ticker:
+                    try:
+                        current_price = float(snapshot.ticker.get("last_price", 0))
+                    except (TypeError, ValueError):
+                        current_price = None
+                try:
+                    entry_price = float(pos.get("entry_price", 0))
+                    size = float(pos.get("size", 0))
+                except (TypeError, ValueError):
+                    entry_price = 0.0
+                    size = 0.0
+
+                side_value = str(pos.get("side", "")).lower()
+                if current_price and entry_price > 0 and size > 0 and side_value in (
+                    "long",
+                    "short",
+                ):
+                    if side_value == "long":
+                        pnl_numeric = (current_price - entry_price) * size
+                    else:
+                        pnl_numeric = (entry_price - current_price) * size
+
             position_str = (
                 f"Symbol: {pos.get('symbol')}, "
                 f"Side: {pos.get('side')}, "
                 f"Size: {pos.get('size')}, "
                 f"Entry: {pos.get('entry_price')}, "
-                f"PnL: {pos.get('unrealized_pnl')}, "
+                f"PnL: {pnl_numeric if pnl_numeric is not None else pos.get('unrealized_pnl')}, "
                 f"Margin: {pos.get('margin')}"
             )
 
