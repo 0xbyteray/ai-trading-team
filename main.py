@@ -206,6 +206,11 @@ class TradingBot:
         self._no_position_threshold = 2
         self._pending_close: dict[str, Any] | None = None
         self._pending_close_started = 0.0
+        self._profit_signal_task: asyncio.Task[None] | None = None
+        self._max_pending_signals = 200
+        self._pending_signal_ttl = 300.0
+        self._last_queue_drop_log = 0.0
+        self._queue_drop_log_interval = 30.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -383,6 +388,37 @@ class TradingBot:
         if self._tui_app:
             self._tui_app.add_risk_event(event_type, message)
 
+    def _queue_signals(self, signals: list[Signal]) -> None:
+        if not signals:
+            return
+
+        now = datetime.now()
+        # Drop stale signals first
+        if self._pending_signal_ttl > 0 and self._pending_signals:
+            dropped = 0
+            while self._pending_signals:
+                age = (now - self._pending_signals[0].timestamp).total_seconds()
+                if age <= self._pending_signal_ttl:
+                    break
+                self._pending_signals.pop(0)
+                dropped += 1
+            if dropped:
+                self._logger.warning(f"Dropped {dropped} stale signals from queue")
+
+        self._pending_signals.extend(signals)
+
+        # Cap queue length
+        if len(self._pending_signals) > self._max_pending_signals:
+            overflow = len(self._pending_signals) - self._max_pending_signals
+            for _ in range(overflow):
+                self._pending_signals.pop(0)
+            now_ts = asyncio.get_event_loop().time()
+            if now_ts - self._last_queue_drop_log >= self._queue_drop_log_interval:
+                self._logger.warning(
+                    f"Signal queue overflow: dropped {overflow} oldest signals"
+                )
+                self._last_queue_drop_log = now_ts
+
     def _build_close_info_from_context(self, reason: str) -> dict[str, Any] | None:
         pos = self._state_machine._context.position
         if not pos.side or pos.size <= 0:
@@ -428,6 +464,10 @@ class TradingBot:
                 "result": "success",
                 "order_id": info.get("order_id"),
             }
+            if info.get("source"):
+                operation["source"] = info.get("source")
+            if info.get("type"):
+                operation["type"] = info.get("type")
             self._data_pool.add_operation(operation)
             self._session_manager.add_operation(operation)
 
@@ -1025,7 +1065,7 @@ class TradingBot:
                                         signal.strength.value,
                                         signal.direction.value,
                                     )
-                                self._pending_signals.extend(signals)
+                                self._queue_signals(signals)
 
                 # Also check for signals when 1m data updates (from WebSocket)
                 snapshot = self._data_pool.get_snapshot()
@@ -1045,7 +1085,7 @@ class TradingBot:
                                     signal.strength.value,
                                     signal.direction.value,
                                 )
-                            self._pending_signals.extend(signals)
+                            self._queue_signals(signals)
 
                         # Update indicators in data pool for AI context
                         self._signal_aggregator.update_indicators()
@@ -1101,13 +1141,46 @@ class TradingBot:
                     await self._check_risk()
 
                 # Handle state timeouts (e.g., waiting_entry)
-                self._state_machine.check_timeout()
+                prev_state = self._state_machine.state
+                timed_out = self._state_machine.check_timeout()
+                if timed_out and prev_state == StrategyState.WAITING_ENTRY:
+                    pending_id = self._pending_entry_order_id
+                    if pending_id:
+                        try:
+                            await self._executor.cancel_order(
+                                self._execution_symbol, pending_id
+                            )
+                            self._logger.warning(
+                                f"Canceled stale entry order after timeout: {pending_id}"
+                            )
+                        except Exception as e:
+                            self._logger.warning(
+                                f"Failed to cancel stale entry order {pending_id}: {e}"
+                            )
+                        self._pending_entry_order_id = None
 
                 # Process pending signals (event-driven, not periodic)
                 if self._signal_task and self._signal_task.done():
                     with contextlib.suppress(Exception):
                         self._signal_task.result()
                     self._signal_task = None
+                if self._profit_signal_task and self._profit_signal_task.done():
+                    with contextlib.suppress(Exception):
+                        self._profit_signal_task.result()
+                    self._profit_signal_task = None
+
+                # Drop stale queued signals before processing
+                if self._pending_signals and self._pending_signal_ttl > 0:
+                    dropped = 0
+                    now_dt = datetime.now()
+                    while self._pending_signals:
+                        age = (now_dt - self._pending_signals[0].timestamp).total_seconds()
+                        if age <= self._pending_signal_ttl:
+                            break
+                        self._pending_signals.pop(0)
+                        dropped += 1
+                    if dropped:
+                        self._logger.warning(f"Dropped {dropped} stale signals from queue")
 
                 if self._pending_signals and self._signal_task is None:
                     signal = self._pending_signals.pop(0)
@@ -1413,15 +1486,21 @@ class TradingBot:
                     await self._execute_move_stop_loss(position, stop_loss_price)
                 else:
                     self._logger.warning("AI returned move_stop_loss without price")
+                if self._state_machine.can_transition(StateTransition.AGENT_HOLD):
+                    self._state_machine.transition(StateTransition.AGENT_HOLD)
 
             elif decision.command.action == AgentAction.CLOSE:
                 # AI decided to close instead of moving stop loss
+                if decision.command.side is None:
+                    decision.command.side = position.side
                 success = await self._execute_command(decision)
                 if success:
                     self._logger.info("Close order placed from profit signal; awaiting confirmation")
 
             elif decision.command.action == AgentAction.OBSERVE:
                 self._logger.info("AI decided to observe, not moving stop loss")
+                if self._state_machine.can_transition(StateTransition.AGENT_HOLD):
+                    self._state_machine.transition(StateTransition.AGENT_HOLD)
 
         except Exception as e:
             self._logger.error(f"Error processing profit signal: {e}")
@@ -1469,6 +1548,8 @@ class TradingBot:
                             "stop_loss_price": stop_loss_price,
                             "result": "failed",
                             "error": "existing stop-loss plan orders not fully cancelled",
+                            "source": "risk",
+                            "type": "move_stop_loss",
                         }
                     )
                     return
@@ -1508,6 +1589,8 @@ class TradingBot:
                         "stop_loss_price": stop_loss_price,
                         "result": "success",
                         "order_id": plan_order_id,
+                        "source": "risk",
+                        "type": "move_stop_loss",
                     }
                 )
             else:
@@ -1529,6 +1612,8 @@ class TradingBot:
                         "stop_loss_price": stop_loss_price,
                         "result": "failed",
                         "error": "plan order not placed",
+                        "source": "risk",
+                        "type": "move_stop_loss",
                     }
                 )
 
@@ -1541,6 +1626,8 @@ class TradingBot:
                     "stop_loss_price": stop_loss_price,
                     "result": "failed",
                     "error": str(e),
+                    "source": "risk",
+                    "type": "move_stop_loss",
                 }
             )
 
@@ -1557,7 +1644,14 @@ class TradingBot:
 
                 # Handle move_stop_loss action (profit threshold signal)
                 if action.action_type == "move_stop_loss":
-                    await self._handle_profit_signal(action)
+                    if self._profit_signal_task and not self._profit_signal_task.done():
+                        self._logger.info("Profit signal already in progress; skipping")
+                        return
+                    if self._state_machine.can_transition(StateTransition.PROFIT_THRESHOLD):
+                        self._state_machine.transition(StateTransition.PROFIT_THRESHOLD)
+                    self._profit_signal_task = asyncio.create_task(
+                        self._handle_profit_signal(action)
+                    )
                     return
 
                 # Force close for high-priority risk actions
@@ -1576,6 +1670,10 @@ class TradingBot:
                         realized_pnl = float(position.unrealized_pnl)
                         trade_side = position.side.value
                         trade_size = float(position.size)
+                        reason_upper = action.reason.upper()
+                        risk_type = "stop_loss"
+                        if "TRAILING STOP" in reason_upper:
+                            risk_type = "trailing_stop"
 
                         order = await self._executor.close_position(
                             symbol=self._execution_symbol,
@@ -1598,6 +1696,8 @@ class TradingBot:
                                     "pnl": realized_pnl,
                                     "reason": action.reason,
                                     "order_id": order.order_id,
+                                    "source": "risk",
+                                    "type": risk_type,
                                 }
                             )
 
