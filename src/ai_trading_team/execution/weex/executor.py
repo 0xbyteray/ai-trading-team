@@ -552,6 +552,115 @@ class WEEXExecutor:
             logger.error(f"Failed to cancel all orders: {e}")
             return 0
 
+    async def cancel_all_plan_orders(self, symbol: str) -> int:
+        """Cancel all plan/trigger orders for a symbol."""
+        client = self._ensure_connected()
+        try:
+            response = await client.post(
+                "/capi/v2/order/cancelAllOrders",
+                data={"cancelOrderType": "plan", "symbol": symbol},
+            )
+            if isinstance(response, list):
+                return sum(1 for item in response if item.get("success"))
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to cancel plan orders: {e}")
+            return 0
+
+    async def get_current_plan_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """Get current plan orders for a symbol."""
+        client = self._ensure_connected()
+        response = await client.get("/capi/v2/order/currentPlan", params={"symbol": symbol})
+        data = self._extract_list(response, ("list", "orders"))
+        if isinstance(response, list):
+            return response
+        return data
+
+    async def cancel_plan_order(self, order_id: str) -> bool:
+        """Cancel a specific plan order by order ID."""
+        client = self._ensure_connected()
+        try:
+            await client.post("/capi/v2/order/cancel_plan", data={"orderId": str(order_id)})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to cancel plan order {order_id}: {e}")
+            return False
+
+    async def cancel_stop_loss_plans(self, symbol: str, side: Side | None = None) -> int:
+        """Cancel existing stop-loss plan orders for a symbol/side."""
+        position_side = None
+        if side == Side.LONG:
+            position_side = "long"
+        elif side == Side.SHORT:
+            position_side = "short"
+
+        plans = await self.get_current_plan_orders(symbol)
+        cancelled = 0
+        for plan in plans:
+            if plan.get("symbol") and plan.get("symbol") != symbol:
+                continue
+            plan_type = str(plan.get("planType") or plan.get("plan_type") or "").lower()
+            if plan_type != "loss_plan":
+                continue
+            if position_side:
+                plan_side = str(plan.get("positionSide") or plan.get("position_side") or "").lower()
+                if plan_side and plan_side != position_side:
+                    continue
+            order_id = plan.get("orderId") or plan.get("order_id")
+            if not order_id:
+                continue
+            if await self.cancel_plan_order(str(order_id)):
+                cancelled += 1
+        return cancelled
+
+    async def place_stop_loss_plan(
+        self,
+        symbol: str,
+        side: Side,
+        size: float,
+        trigger_price: float,
+    ) -> str | None:
+        """Place a stop-loss plan order for an existing position."""
+        client = self._ensure_connected()
+        contract = await self._get_contract(symbol)
+        size_step = self._size_step_from_contract(contract)
+        price_step = self._price_step_from_contract(contract)
+
+        size_decimal = self._decimal_or_zero(size)
+        adjusted_size = self._quantize_step(size_decimal, size_step, ROUND_DOWN)
+        if adjusted_size <= 0:
+            raise ValueError(
+                f"Stop loss size {size_decimal} invalid after step adjustment (step={size_step})"
+            )
+
+        rounding = ROUND_DOWN if side == Side.LONG else ROUND_UP
+        adjusted_trigger = self._quantize_step(
+            self._decimal_or_zero(trigger_price), price_step, rounding
+        )
+        if adjusted_trigger <= 0:
+            raise ValueError("Stop loss trigger price must be > 0")
+
+        client_order_id = f"sl_{uuid.uuid4().hex[:16]}"
+        position_side = "long" if side == Side.LONG else "short"
+
+        data = {
+            "symbol": symbol,
+            "clientOrderId": client_order_id,
+            "planType": "loss_plan",
+            "triggerPrice": self._format_decimal(adjusted_trigger),
+            "executePrice": "0",
+            "size": self._format_decimal(adjusted_size),
+            "positionSide": position_side,
+            "marginMode": 3,
+        }
+
+        response = await client.post("/capi/v2/order/placeTpSlOrder", data=data)
+        if isinstance(response, list) and response:
+            item = response[0]
+            if item.get("success"):
+                return str(item.get("orderId") or "")
+        return None
+
     async def get_open_orders(self, symbol: str) -> list[Order]:
         """Get all open orders for a symbol."""
         client = self._ensure_connected()

@@ -304,6 +304,38 @@ class TradingBot:
             self._logger.info("Detected open position; syncing state machine context")
             self._state_machine.transition(StateTransition.AGENT_OPEN, {"position": pos_ctx})
 
+    def _calculate_lock_in_stop_loss(
+        self,
+        position: Position,
+        threshold_level: float,
+    ) -> float | None:
+        if threshold_level <= 0:
+            return None
+
+        leverage = position.leverage or self._config.trading.leverage or 1
+        if leverage <= 0:
+            return None
+
+        entry_price = float(position.entry_price)
+        if entry_price <= 0:
+            return None
+
+        lock_in_percent = max(threshold_level - 10.0, 0.0)
+        offset = (lock_in_percent / 100.0) / float(leverage)
+
+        if position.side == Side.LONG:
+            target = entry_price * (1 + offset)
+            current = self._state_machine._context.position.stop_loss_price
+            if current and target < current:
+                return current
+            return target
+
+        target = entry_price * (1 - offset)
+        current = self._state_machine._context.position.stop_loss_price
+        if current and target > current:
+            return current
+        return target
+
     def _notify_signal(self, signal_type: str, details: str) -> None:
         """Send signal notification to TUI.
 
@@ -1078,8 +1110,20 @@ class TradingBot:
 
             # Execute move_stop_loss if AI decided
             if decision.command.action == AgentAction.MOVE_STOP_LOSS:
-                if decision.command.stop_loss_price:
-                    await self._execute_move_stop_loss(position, decision.command.stop_loss_price)
+                stop_loss_price = decision.command.stop_loss_price
+                if not stop_loss_price or stop_loss_price <= 0:
+                    threshold_level = float(action.data.get("threshold_level", 0))
+                    stop_loss_price = self._calculate_lock_in_stop_loss(
+                        position,
+                        threshold_level,
+                    )
+                    if stop_loss_price:
+                        self._logger.info(
+                            "AI stop loss missing; using lock-in fallback at "
+                            f"{stop_loss_price:.6f}"
+                        )
+                if stop_loss_price:
+                    await self._execute_move_stop_loss(position, stop_loss_price)
                 else:
                     self._logger.warning("AI returned move_stop_loss without price")
 
@@ -1115,15 +1159,35 @@ class TradingBot:
                     self._logger.info(f"Cancelled old stop loss order: {order.order_id}")
                     cancelled_count += 1
 
-            # Note: Modifying stop loss on existing positions can require
-            # exchange-specific conditional order APIs.
-            # For now, we log the intended stop loss and update the state context
-            # for the AI to be aware of the intended stop level.
-            self._logger.warning(
-                f"Stop loss move requested to {stop_loss_price:.4f}. "
-                f"Note: Modifying stop loss on existing positions requires plan order API. "
-                f"Cancelled {cancelled_count} existing stop orders."
-            )
+            plan_cancelled = 0
+            cancel_stop_loss_plans = getattr(self._executor, "cancel_stop_loss_plans", None)
+            if callable(cancel_stop_loss_plans):
+                plan_cancelled = await cancel_stop_loss_plans(
+                    self._execution_symbol,
+                    position.side,
+                )
+
+            place_stop_loss_plan = getattr(self._executor, "place_stop_loss_plan", None)
+            plan_order_id = None
+            if callable(place_stop_loss_plan):
+                plan_order_id = await place_stop_loss_plan(
+                    symbol=self._execution_symbol,
+                    side=position.side,
+                    size=float(position.size),
+                    trigger_price=stop_loss_price,
+                )
+
+            if plan_order_id:
+                self._logger.info(
+                    "Stop loss plan order placed: "
+                    f"{plan_order_id} (cancelled {cancelled_count} stop orders, "
+                    f"{plan_cancelled} plan orders)"
+                )
+            else:
+                self._logger.warning(
+                    f"Stop loss move requested to {stop_loss_price:.4f}. "
+                    f"Cancelled {cancelled_count} stop orders and {plan_cancelled} plan orders."
+                )
 
             # Update position context with new stop loss target for AI reference
             if self._state_machine._context.position:
@@ -1137,8 +1201,8 @@ class TradingBot:
                     "action": "move_stop_loss",
                     "side": position.side.value,
                     "stop_loss_price": stop_loss_price,
-                    "result": "logged",
-                    "note": "Plan order API required for actual stop modification",
+                    "result": "success" if plan_order_id else "logged",
+                    "order_id": plan_order_id,
                 }
             )
 
