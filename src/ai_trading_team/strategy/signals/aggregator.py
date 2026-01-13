@@ -530,6 +530,20 @@ class SignalAggregator:
                         },
                     )
 
+        atr_values: list[float] = []
+        for interval in ("5m", "15m", "1h", "4h"):
+            interval_klines = snapshot.klines.get(interval, []) if snapshot.klines else []
+            atr_pct = self._calculate_atr_pct(interval_klines, 14)
+            if atr_pct is None:
+                continue
+            atr_pct = round(atr_pct, 4)
+            atr_values.append(atr_pct)
+            self._data_pool.update_indicator(f"ATR_14_{interval}", atr_pct)
+
+        if atr_values:
+            composite_atr = round(sum(atr_values) / len(atr_values), 4)
+            self._data_pool.update_indicator("ATR_14_COMPOSITE", composite_atr)
+
     def _calculate_rsi(self, closes: list[float], period: int) -> float | None:
         """Calculate RSI from close prices."""
         if len(closes) < period + 1:
@@ -564,3 +578,25 @@ class SignalAggregator:
         lower = middle - (std_dev * std)
 
         return upper, middle, lower
+
+    def _calculate_atr_pct(self, klines: list[dict[str, Any]], period: int) -> float | None:
+        """Calculate ATR as a percent of price."""
+        if len(klines) < period + 1:
+            return None
+
+        true_ranges: list[float] = []
+        for i in range(1, len(klines)):
+            high = float(klines[i].get("high", 0))
+            low = float(klines[i].get("low", 0))
+            prev_close = float(klines[i - 1].get("close", 0))
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            true_ranges.append(tr)
+
+        if len(true_ranges) < period:
+            return None
+
+        atr = sum(true_ranges[-period:]) / period
+        last_close = float(klines[-1].get("close", 0))
+        if last_close <= 0 or atr <= 0:
+            return None
+        return atr / last_close * 100

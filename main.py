@@ -414,20 +414,42 @@ class TradingBot:
         }
         return snapshot
 
-    def _recent_range_pct(self, snapshot: Any) -> float | None:
+    def _get_atr_pct(self, snapshot: Any, interval: str, period: int = 14) -> float | None:
+        indicators = snapshot.indicators or {}
+        indicator_key = f"ATR_{period}_{interval}"
+        indicator_value = indicators.get(indicator_key)
+        if isinstance(indicator_value, (int, float)) and indicator_value > 0:
+            return float(indicator_value)
+
         klines = snapshot.klines or {}
-        for interval, count in (("15m", 8), ("5m", 12), ("1h", 4)):
-            series = klines.get(interval, [])
-            if len(series) < count:
-                continue
-            recent = series[-count:]
-            highs = [float(k.get("high", 0)) for k in recent]
-            lows = [float(k.get("low", 0)) for k in recent]
-            last_close = float(recent[-1].get("close", 0))
-            if last_close <= 0:
-                continue
-            return (max(highs) - min(lows)) / last_close * 100
-        return None
+        series = klines.get(interval, [])
+        if len(series) < period + 1:
+            return None
+        recent = series[-(period + 1) :]
+        true_ranges: list[float] = []
+        for i in range(1, len(recent)):
+            high = float(recent[i].get("high", 0))
+            low = float(recent[i].get("low", 0))
+            prev_close = float(recent[i - 1].get("close", 0))
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            true_ranges.append(tr)
+        if len(true_ranges) < period:
+            return None
+        atr = sum(true_ranges[-period:]) / period
+        last_close = float(recent[-1].get("close", 0))
+        if last_close <= 0 or atr <= 0:
+            return None
+        return atr / last_close * 100
+
+    def _composite_atr_pct(self, snapshot: Any) -> float | None:
+        atr_values = []
+        for interval in ("5m", "15m", "1h", "4h"):
+            atr_pct = self._get_atr_pct(snapshot, interval)
+            if atr_pct is not None:
+                atr_values.append(atr_pct)
+        if not atr_values:
+            return None
+        return sum(atr_values) / len(atr_values)
 
     def _queue_signals(self, signals: list[Signal]) -> None:
         if not signals:
@@ -2254,18 +2276,18 @@ class TradingBot:
         risk_pct = (30.0 / leverage) * self._min_rr_ratio
         fee_pct = self._fee_round_trip_pct * self._min_rr_ratio
         required_move_pct = max(risk_pct, fee_pct)
-        recent_range_pct = self._recent_range_pct(snapshot)
-        if recent_range_pct is not None and recent_range_pct < required_move_pct:
+        composite_atr_pct = self._composite_atr_pct(snapshot)
+        if composite_atr_pct is not None and composite_atr_pct < required_move_pct:
             self._logger.info(
-                "Entry skipped: range %.3f%% < min %.3f%% (RR %.1fx + fees)",
-                recent_range_pct,
+                "Entry skipped: ATR(avg) %.3f%% < min %.3f%% (RR %.1fx + fees)",
+                composite_atr_pct,
                 required_move_pct,
                 self._min_rr_ratio,
             )
             self._notify_agent_log(
                 "OBSERVE",
-                "Range too narrow",
-                f"{recent_range_pct:.3f}% < {required_move_pct:.3f}%",
+                "ATR too low",
+                f"{composite_atr_pct:.3f}% < {required_move_pct:.3f}%",
             )
             if self._state_machine.can_transition(StateTransition.AGENT_OBSERVE):
                 self._state_machine.transition(StateTransition.AGENT_OBSERVE)

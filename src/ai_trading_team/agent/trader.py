@@ -353,6 +353,11 @@ class LangChainTradingAgent:
         if snapshot.indicators:
             indicators_str = self._format_indicators(snapshot.indicators)
 
+        # Format ATR (multi-timeframe)
+        atr_str = "N/A"
+        if snapshot.indicators:
+            atr_str = self._format_atr(snapshot.indicators)
+
         # Format funding rate
         funding_str = "N/A"
         if snapshot.funding_rate:
@@ -474,6 +479,7 @@ class LangChainTradingAgent:
             "klines": klines_str,
             "orderbook": orderbook_str,
             "indicators": indicators_str,
+            "atr": atr_str,
             "funding_rate": funding_str,
             "long_short_ratio": ls_ratio_str,
             "position": position_str,
@@ -512,6 +518,18 @@ class LangChainTradingAgent:
                 lines.append(f"{key}: {value}")
 
         return "\n".join(lines) if lines else "N/A"
+
+    def _format_atr(self, indicators: dict[str, Any]) -> str:
+        atr_values: list[str] = []
+        for interval in ("5m", "15m", "1h", "4h"):
+            key = f"ATR_14_{interval}"
+            value = indicators.get(key)
+            if isinstance(value, (int, float)):
+                atr_values.append(f"{interval}:{value:.4f}%")
+        composite = indicators.get("ATR_14_COMPOSITE")
+        if isinstance(composite, (int, float)):
+            atr_values.append(f"composite:{composite:.4f}%")
+        return ", ".join(atr_values) if atr_values else "N/A"
 
     def _snapshot_to_dict(self, snapshot: DataSnapshot) -> dict[str, Any]:
         """Convert snapshot to serializable dict."""
