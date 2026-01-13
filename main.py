@@ -211,8 +211,11 @@ class TradingBot:
         self._pending_signal_ttl = 300.0
         self._last_queue_drop_log = 0.0
         self._queue_drop_log_interval = 30.0
+        self._maker_fee_rate = 0.0002
+        self._taker_fee_rate = 0.0008
+        self._fee_round_trip_pct = float(self._taker_fee_rate * 2 * 100)
         self._min_hold_seconds = 180.0
-        self._min_close_move_pct = 0.2
+        self._min_close_move_pct = max(0.2, self._fee_round_trip_pct * 1.25)
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
