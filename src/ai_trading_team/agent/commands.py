@@ -30,6 +30,7 @@ class AgentCommand:
     price: float | None = None
     order_type: OrderType | None = None
     stop_loss_price: float | None = None  # Stop loss price for MOVE_STOP_LOSS action
+    take_profit_price: float | None = None  # Take profit price for OPEN/ADD actions
 
     def is_actionable(self) -> bool:
         """Check if command requires execution."""
@@ -59,6 +60,11 @@ class AgentCommand:
             self.stop_loss_price is None or self.stop_loss_price <= 0
         ):
             errors.append("stop_loss_price is required for move_stop_loss action")
+
+        if self.action in (AgentAction.OPEN, AgentAction.ADD) and (
+            self.take_profit_price is None or self.take_profit_price <= 0
+        ):
+            errors.append("take_profit_price is required for open/add actions")
 
         if self.order_type == OrderType.LIMIT and self.price is None:
             errors.append("price is required for limit orders")

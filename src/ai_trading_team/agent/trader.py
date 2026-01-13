@@ -294,6 +294,9 @@ class LangChainTradingAgent:
             price=_parse_float(data.get("price")),
             order_type=order_type,
             stop_loss_price=_parse_float(data.get("stop_loss_price")),
+            take_profit_price=_parse_float(
+                data.get("take_profit_price", data.get("take_profit"))
+            ),
             reason=data.get("reason", "No reason provided"),
         )
 

@@ -219,7 +219,8 @@ class TradingBot:
         self._fee_round_trip_pct = float(self._taker_fee_rate * 2 * 100)
         self._min_hold_seconds = 180.0
         self._min_trade_move_pct = self._fee_round_trip_pct * 2.0
-        self._min_close_move_pct = max(self._min_trade_move_pct * 2.0, 0.2)
+        self._min_entry_move_pct = max(self._min_trade_move_pct * 2.0, 0.2)
+        self._min_close_move_pct = max(self._min_entry_move_pct, 0.2)
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -447,6 +448,28 @@ class TradingBot:
         if high is None or low is None or close is None or close <= 0:
             return None
         return (high - low) / close * 100
+
+    def _calculate_reward_risk(
+        self,
+        side: Side,
+        entry_price: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+    ) -> float | None:
+        if entry_price <= 0 or stop_loss_price <= 0 or take_profit_price <= 0:
+            return None
+
+        if side == Side.LONG:
+            risk = entry_price - stop_loss_price
+            reward = take_profit_price - entry_price
+        else:
+            risk = stop_loss_price - entry_price
+            reward = entry_price - take_profit_price
+
+        if risk <= 0 or reward <= 0:
+            return None
+
+        return reward / risk
 
     def _notify_signal(self, signal_type: str, details: str) -> None:
         """Send signal notification to TUI.
@@ -689,6 +712,7 @@ class TradingBot:
                         "side": decision.command.side.value if decision.command.side else None,
                         "size": decision.command.size,
                         "price": decision.command.price,
+                        "take_profit_price": decision.command.take_profit_price,
                         "order_type": decision.command.order_type.value
                         if decision.command.order_type
                         else None,
@@ -2298,6 +2322,64 @@ class TradingBot:
                 self._notify_agent_log("ADD", "Invalid size", "Skipping")
                 return
 
+            snapshot = self._data_pool.get_snapshot()
+            volatility_pct = self._get_volatility_percent(snapshot)
+            if volatility_pct is None:
+                self._logger.info("ADD skipped: volatility unavailable")
+                self._notify_agent_log("ADD", "Low volatility", "volatility unavailable")
+                return
+            if self._min_entry_move_pct > 0 and volatility_pct < self._min_entry_move_pct:
+                self._logger.info(
+                    "ADD skipped: volatility %.3f%% < min %.3f%%",
+                    volatility_pct,
+                    self._min_entry_move_pct,
+                )
+                self._notify_agent_log(
+                    "ADD",
+                    "Low volatility",
+                    f"{volatility_pct:.3f}% < {self._min_entry_move_pct:.3f}%",
+                )
+                return
+
+            take_profit_price = decision.command.take_profit_price
+            if not take_profit_price or take_profit_price <= 0:
+                self._logger.warning("ADD rejected: take_profit_price required")
+                self._notify_risk_event(
+                    "RR_LIMIT",
+                    "ADD rejected: take_profit_price required for RR check",
+                )
+                return
+
+            current_price = self._get_current_price()
+            if current_price <= 0:
+                self._logger.warning("ADD rejected: invalid current price")
+                return
+            leverage = self._config.trading.leverage or 1
+            stop_loss_offset = 0.30 / leverage
+            if position.side == Side.LONG:
+                stop_loss_price = current_price * (1 - stop_loss_offset)
+            else:
+                stop_loss_price = current_price * (1 + stop_loss_offset)
+            rr = self._calculate_reward_risk(
+                position.side,
+                current_price,
+                stop_loss_price,
+                take_profit_price,
+            )
+            if rr is None or rr < 3.0:
+                self._logger.warning(
+                    "ADD rejected: RR %.2f < 3.0 (entry %.6f, stop %.6f, tp %.6f)",
+                    rr or 0.0,
+                    current_price,
+                    stop_loss_price,
+                    take_profit_price,
+                )
+                self._notify_risk_event(
+                    "RR_LIMIT",
+                    f"ADD rejected: RR {rr or 0.0:.2f} < 3.0",
+                )
+                return
+
             order = await self._executor.add_to_position(
                 symbol=self._execution_symbol,
                 side=position.side,
@@ -2371,20 +2453,21 @@ class TradingBot:
         snapshot = self._ensure_snapshot_position(snapshot)
 
         volatility_pct = self._get_volatility_percent(snapshot)
-        if (
-            volatility_pct is not None
-            and self._min_trade_move_pct > 0
-            and volatility_pct < self._min_trade_move_pct
-        ):
+        if volatility_pct is None:
+            self._logger.info("Entry skipped: volatility unavailable")
+            self._notify_agent_log("OBSERVE", "Low volatility", "volatility unavailable")
+            self._state_machine.transition(StateTransition.AGENT_OBSERVE)
+            return
+        if self._min_entry_move_pct > 0 and volatility_pct < self._min_entry_move_pct:
             self._logger.info(
                 "Entry skipped: volatility %.3f%% < min %.3f%%",
                 volatility_pct,
-                self._min_trade_move_pct,
+                self._min_entry_move_pct,
             )
             self._notify_agent_log(
                 "OBSERVE",
                 "Low volatility",
-                f"{volatility_pct:.3f}% < {self._min_trade_move_pct:.3f}%",
+                f"{volatility_pct:.3f}% < {self._min_entry_move_pct:.3f}%",
             )
             self._state_machine.transition(StateTransition.AGENT_OBSERVE)
             return
@@ -2607,9 +2690,39 @@ class TradingBot:
                     else:  # SHORT
                         stop_loss_price = current_price * (1 + stop_loss_offset)
 
+                    take_profit_price = command.take_profit_price
+                    if not take_profit_price or take_profit_price <= 0:
+                        self._logger.warning("Order rejected: take_profit_price required")
+                        self._notify_risk_event(
+                            "RR_LIMIT",
+                            "Order rejected: take_profit_price required for RR check",
+                        )
+                        return False
+
+                    rr = self._calculate_reward_risk(
+                        command.side,
+                        current_price,
+                        stop_loss_price,
+                        take_profit_price,
+                    )
+                    if rr is None or rr < 3.0:
+                        self._logger.warning(
+                            "Order rejected: RR %.2f < 3.0 (entry %.6f, stop %.6f, tp %.6f)",
+                            rr or 0.0,
+                            current_price,
+                            stop_loss_price,
+                            take_profit_price,
+                        )
+                        self._notify_risk_event(
+                            "RR_LIMIT",
+                            f"Order rejected: RR {rr or 0.0:.2f} < 3.0",
+                        )
+                        return False
+
                     self._logger.info(
                         f"Opening position: {command.side.value} {order_size} @ ~{current_price:.4f}, "
-                        f"margin: ${order_margin:.2f}, stop loss: {stop_loss_price:.4f}"
+                        f"margin: ${order_margin:.2f}, stop loss: {stop_loss_price:.4f}, "
+                        f"take profit: {take_profit_price:.4f}, RR: {rr:.2f}"
                     )
 
                     order = await self._executor.place_order(
@@ -2620,6 +2733,7 @@ class TradingBot:
                         price=command.price,
                         action="open",
                         stop_loss_price=stop_loss_price,
+                        take_profit_price=take_profit_price,
                     )
                     self._logger.info(f"Opened position: {order.order_id}")
                     self._pending_entry_order_id = order.order_id or None
@@ -2631,6 +2745,8 @@ class TradingBot:
                         extra_output={
                             "execution_action": "open",
                             "stop_loss_price": stop_loss_price,
+                            "take_profit_price": take_profit_price,
+                            "reward_risk_ratio": rr,
                             "margin_mode": 3,
                         },
                     )
