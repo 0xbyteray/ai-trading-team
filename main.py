@@ -233,6 +233,10 @@ class TradingBot:
         self._min_trade_move_pct = self._fee_round_trip_pct * 2.0
         self._min_entry_move_pct = max(self._min_trade_move_pct * 2.0, 0.2)
         self._min_close_move_pct = max(self._min_entry_move_pct, 0.2)
+        self._min_flip_move_pct = self._fee_round_trip_pct * 2.0
+        self._last_closed_side: Side | None = None
+        self._last_closed_price: float | None = None
+        self._last_closed_time: datetime | None = None
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -460,6 +464,47 @@ class TradingBot:
         if high is None or low is None or close is None or close <= 0:
             return None
         return (high - low) / close * 100
+
+    def _should_block_entry(
+        self,
+        decision: AgentDecision,
+        snapshot: Any,
+    ) -> tuple[bool, str]:
+        if decision.command.action not in (AgentAction.OPEN, AgentAction.ADD):
+            return False, ""
+        if not decision.command.side:
+            return True, "entry blocked: missing side"
+
+        volatility_pct = self._get_volatility_percent(snapshot)
+        if volatility_pct is None:
+            return True, "entry blocked: volatility unavailable"
+        if self._min_entry_move_pct > 0 and volatility_pct < self._min_entry_move_pct:
+            return (
+                True,
+                f"entry blocked: volatility {volatility_pct:.3f}% < "
+                f"min {self._min_entry_move_pct:.3f}%",
+            )
+
+        last_side = self._last_closed_side
+        last_price = self._last_closed_price
+        if last_side and last_price and last_price > 0 and decision.command.side != last_side:
+            current_price = None
+            if decision.command.price is not None:
+                current_price = self._safe_float(decision.command.price)
+            if current_price is None and snapshot.ticker:
+                current_price = self._safe_float(snapshot.ticker.get("last_price"))
+            if current_price is None or current_price <= 0:
+                current_price = self._get_current_price()
+            if current_price > 0:
+                move_pct = abs(current_price - last_price) / last_price * 100
+                if move_pct < self._min_flip_move_pct:
+                    return (
+                        True,
+                        f"entry blocked: flip move {move_pct:.3f}% < "
+                        f"fee {self._min_flip_move_pct:.3f}%",
+                    )
+
+        return False, ""
 
     def _calculate_reward_risk(
         self,
@@ -778,6 +823,15 @@ class TradingBot:
                 operation["type"] = info.get("type")
             self._data_pool.add_operation(operation)
             self._session_manager.add_operation(operation)
+            if exit_price > 0:
+                if side == "long":
+                    self._last_closed_side = Side.LONG
+                elif side == "short":
+                    self._last_closed_side = Side.SHORT
+                else:
+                    self._last_closed_side = None
+                self._last_closed_price = exit_price
+                self._last_closed_time = datetime.now()
 
         if self._state_machine.can_transition(StateTransition.POSITION_CLOSED):
             self._state_machine.transition(StateTransition.POSITION_CLOSED)
@@ -2569,26 +2623,6 @@ class TradingBot:
         snapshot = self._data_pool.get_snapshot()
         snapshot = self._ensure_snapshot_position(snapshot)
 
-        volatility_pct = self._get_volatility_percent(snapshot)
-        if volatility_pct is None:
-            self._logger.info("Entry skipped: volatility unavailable")
-            self._notify_agent_log("OBSERVE", "Low volatility", "volatility unavailable")
-            self._state_machine.transition(StateTransition.AGENT_OBSERVE)
-            return
-        if self._min_entry_move_pct > 0 and volatility_pct < self._min_entry_move_pct:
-            self._logger.info(
-                "Entry skipped: volatility %.3f%% < min %.3f%%",
-                volatility_pct,
-                self._min_entry_move_pct,
-            )
-            self._notify_agent_log(
-                "OBSERVE",
-                "Low volatility",
-                f"{volatility_pct:.3f}% < {self._min_entry_move_pct:.3f}%",
-            )
-            self._state_machine.transition(StateTransition.AGENT_OBSERVE)
-            return
-
         # Convert Signal to StrategySignal format for agent
         from ai_trading_team.core.signal_queue import (
             SignalType as OldSignalType,
@@ -2621,6 +2655,35 @@ class TradingBot:
             f"size={decision.command.size or 'N/A'}",
             decision.command.reason[:60],
         )
+
+        if decision.command.action in (AgentAction.OPEN, AgentAction.ADD):
+            if decision.command.is_actionable():
+                blocked, reason = self._should_block_entry(decision, snapshot)
+                if blocked:
+                    self._logger.info("%s", reason)
+                    self._notify_agent_log("OBSERVE", "Entry blocked", reason)
+                    try:
+                        await self._executor.upload_ai_log(
+                            stage="Signal Processing",
+                            model=decision.model,
+                            input_data={
+                                "signal_type": sanitized_signal.get("category", "signal_event"),
+                                "signal_data": sanitized_signal,
+                                "market_snapshot": decision.market_snapshot,
+                            },
+                            output={
+                                "action": "observe",
+                                "side": decision.command.side.value
+                                if decision.command.side
+                                else None,
+                                "size": decision.command.size,
+                            },
+                            explanation=reason,
+                        )
+                    except Exception as e:
+                        self._logger.warning(f"Failed to upload AI log: {e}")
+                    self._state_machine.transition(StateTransition.AGENT_OBSERVE)
+                    return
 
         should_upload_decision_log = True
         if decision.command.action in (AgentAction.OPEN, AgentAction.ADD):
