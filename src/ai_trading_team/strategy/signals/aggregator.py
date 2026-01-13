@@ -531,17 +531,22 @@ class SignalAggregator:
                     )
 
         atr_values: list[float] = []
-        for interval in ("5m", "15m", "1h", "4h"):
+        weights = {"5m": 0.4, "15m": 0.3, "1h": 0.2, "4h": 0.1}
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for interval, weight in weights.items():
             interval_klines = snapshot.klines.get(interval, []) if snapshot.klines else []
             atr_pct = self._calculate_atr_pct(interval_klines, 14)
             if atr_pct is None:
                 continue
             atr_pct = round(atr_pct, 4)
             atr_values.append(atr_pct)
+            weighted_sum += atr_pct * weight
+            total_weight += weight
             self._data_pool.update_indicator(f"ATR_14_{interval}", atr_pct)
 
-        if atr_values:
-            composite_atr = round(sum(atr_values) / len(atr_values), 4)
+        if atr_values and total_weight > 0:
+            composite_atr = round(weighted_sum / total_weight, 4)
             self._data_pool.update_indicator("ATR_14_COMPOSITE", composite_atr)
 
     def _calculate_rsi(self, closes: list[float], period: int) -> float | None:

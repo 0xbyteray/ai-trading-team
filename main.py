@@ -442,14 +442,18 @@ class TradingBot:
         return atr / last_close * 100
 
     def _composite_atr_pct(self, snapshot: Any) -> float | None:
-        atr_values = []
-        for interval in ("5m", "15m", "1h", "4h"):
+        weights = {"5m": 0.4, "15m": 0.3, "1h": 0.2, "4h": 0.1}
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for interval, weight in weights.items():
             atr_pct = self._get_atr_pct(snapshot, interval)
-            if atr_pct is not None:
-                atr_values.append(atr_pct)
-        if not atr_values:
+            if atr_pct is None:
+                continue
+            weighted_sum += atr_pct * weight
+            total_weight += weight
+        if total_weight <= 0:
             return None
-        return sum(atr_values) / len(atr_values)
+        return weighted_sum / total_weight
 
     def _queue_signals(self, signals: list[Signal]) -> None:
         if not signals:
@@ -2279,7 +2283,7 @@ class TradingBot:
         composite_atr_pct = self._composite_atr_pct(snapshot)
         if composite_atr_pct is not None and composite_atr_pct < required_move_pct:
             self._logger.info(
-                "Entry skipped: ATR(avg) %.3f%% < min %.3f%% (RR %.1fx + fees)",
+                "Entry skipped: ATR(weighted) %.3f%% < min %.3f%% (RR %.1fx + fees)",
                 composite_atr_pct,
                 required_move_pct,
                 self._min_rr_ratio,
