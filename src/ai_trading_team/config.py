@@ -32,11 +32,21 @@ class TradingConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Telegram notification configuration."""
+
+    bot_token: str = ""
+    chat_id: str = ""
+    account_label: str = ""
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
     api: APIConfig = field(default_factory=APIConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
     @classmethod
     def from_env(cls, env_path: Path | None = None) -> "Config":
@@ -74,4 +84,10 @@ class Config:
             dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         )
 
-        return cls(api=api, trading=trading)
+        telegram = TelegramConfig(
+            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            account_label=os.getenv("TELEGRAM_ACCOUNT_LABEL", ""),
+        )
+
+        return cls(api=api, trading=trading, telegram=telegram)

@@ -57,6 +57,9 @@ See `env.example` for all options. Common variables:
 | TRADING_EXCHANGE | Execution exchange | weex or binance |
 | TRADING_LEVERAGE | Leverage | Clamped to 1-20 |
 | TRADING_MAX_POSITION_PERCENT | Position sizing limit | Percent of available balance |
+| TELEGRAM_BOT_TOKEN | Telegram bot token | Optional |
+| TELEGRAM_CHAT_ID | Telegram chat ID | Optional |
+| TELEGRAM_ACCOUNT_LABEL | Notification label | Optional |
 | DRY_RUN | Simulated execution | true or false |
 
 Notes:

@@ -18,6 +18,7 @@ Signals are NOT periodic - they only fire when state CHANGES.
 
 import asyncio
 import contextlib
+import html
 import logging
 import signal
 from datetime import datetime
@@ -30,7 +31,7 @@ from ai_trading_team.agent.trader import LangChainTradingAgent
 from ai_trading_team.config import Config
 from ai_trading_team.core.data_pool import DataPool
 from ai_trading_team.core.session import SessionManager
-from ai_trading_team.core.types import OrderType, Side
+from ai_trading_team.core.types import EventType, OrderType, Side
 from ai_trading_team.data.manager import BinanceDataManager
 from ai_trading_team.execution.binance.executor import BinanceExecutor
 from ai_trading_team.execution.models import Position
@@ -38,6 +39,7 @@ from ai_trading_team.execution.mock_executor import MockExecutor
 from ai_trading_team.execution.weex.executor import WEEXExecutor
 from ai_trading_team.execution.weex.stream import WEEXPrivateStream
 from ai_trading_team.logging import setup_logging
+from ai_trading_team.notifications import TelegramNotifier
 from ai_trading_team.risk.monitor import RiskMonitor
 from ai_trading_team.risk.rules import DynamicTakeProfitRule, ForceStopLossRule, TrailingStopRule
 from ai_trading_team.strategy.signals import (
@@ -116,6 +118,16 @@ class TradingBot:
 
         # Core components
         self._data_pool = DataPool()
+        self._telegram_notifier = TelegramNotifier(
+            bot_token=config.telegram.bot_token,
+            chat_id=config.telegram.chat_id,
+            account_label=config.telegram.account_label
+            or f"{self._exchange}:{self._execution_symbol}",
+        )
+        self._telegram_lock = asyncio.Lock()
+        self._last_position_notice: dict[str, Any] | None = None
+        self._position_notify_ready = False
+        self._data_pool.subscribe(self._handle_data_event)
 
         # Session manager for state persistence
         self._session_manager = SessionManager(
@@ -501,6 +513,111 @@ class TradingBot:
         """
         if self._tui_app:
             self._tui_app.add_risk_event(event_type, message)
+
+    def _handle_data_event(self, event_type: EventType, data: Any) -> None:
+        if event_type != EventType.POSITION_UPDATED:
+            return
+        if not self._telegram_notifier.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._handle_position_notification(data))
+
+    async def _handle_position_notification(self, position: dict[str, Any] | None) -> None:
+        async with self._telegram_lock:
+            await self._process_position_notification(position)
+
+    async def _process_position_notification(self, position: dict[str, Any] | None) -> None:
+        current = self._normalize_position_for_notify(position)
+        if not self._position_notify_ready:
+            self._position_notify_ready = True
+            self._last_position_notice = current
+            return
+
+        previous = self._last_position_notice
+        self._last_position_notice = current
+
+        if not previous and not current:
+            return
+
+        if previous and current and previous["side"] != current["side"]:
+            await self._send_position_message("Position Closed", previous)
+            await self._send_position_message("Position Opened", current)
+            return
+
+        if not previous and current:
+            await self._send_position_message("Position Opened", current)
+            return
+
+        if previous and not current:
+            await self._send_position_message("Position Closed", previous)
+            return
+
+        if previous and current:
+            delta = current["size"] - previous["size"]
+            if abs(delta) < 1e-9:
+                return
+            title = "Position Increased" if delta > 0 else "Position Reduced"
+            await self._send_position_message(title, current, delta=delta)
+
+    def _normalize_position_for_notify(
+        self, position: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not position:
+            return None
+
+        size = self._safe_float(position.get("size")) or 0.0
+        if size <= 0:
+            return None
+
+        side_raw = str(position.get("side") or "").lower()
+        side = side_raw if side_raw in ("long", "short") else "unknown"
+        entry_price = self._safe_float(position.get("entry_price")) or 0.0
+        leverage = int(position.get("leverage") or self._config.trading.leverage)
+        symbol = str(position.get("symbol") or self._execution_symbol)
+
+        return {
+            "symbol": symbol,
+            "side": side,
+            "size": size,
+            "entry_price": entry_price,
+            "leverage": leverage,
+        }
+
+    def _format_number(self, value: float) -> str:
+        formatted = f"{value:.6f}"
+        if "." in formatted:
+            formatted = formatted.rstrip("0").rstrip(".")
+        return formatted
+
+    async def _send_position_message(
+        self,
+        title: str,
+        position: dict[str, Any],
+        delta: float | None = None,
+    ) -> None:
+        label = self._telegram_notifier.account_label
+        lines = [f"<b>{html.escape(title)}</b>"]
+        if label:
+            lines.append(f"Account: {html.escape(label)}")
+        lines.append(f"Symbol: {html.escape(position['symbol'])}")
+        lines.append(f"Side: {html.escape(position['side'])}")
+        if delta is not None:
+            delta_value = self._format_number(delta)
+            if delta > 0:
+                delta_value = f"+{delta_value}"
+            lines.append(f"Delta: {html.escape(delta_value)}")
+        lines.append(f"Size: {html.escape(self._format_number(position['size']))}")
+        if position["entry_price"] > 0:
+            lines.append(
+                f"Entry: {html.escape(self._format_number(position['entry_price']))}"
+            )
+        if position["leverage"] > 0:
+            lines.append(f"Leverage: {position['leverage']}x")
+        message = "\n".join(lines)
+        await self._telegram_notifier.send_message(message)
 
     def _ensure_snapshot_position(self, snapshot: Any) -> Any:
         if snapshot.position:
