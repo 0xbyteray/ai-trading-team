@@ -357,6 +357,8 @@ class LangChainTradingAgent:
         atr_str = "N/A"
         if snapshot.indicators:
             atr_str = self._format_atr(snapshot.indicators)
+        if atr_str == "N/A" and snapshot.klines:
+            atr_str = self._format_atr_from_klines(snapshot.klines)
 
         # Format funding rate
         funding_str = "N/A"
@@ -530,6 +532,45 @@ class LangChainTradingAgent:
         if isinstance(composite, (int, float)):
             atr_values.append(f"composite:{composite:.4f}%")
         return ", ".join(atr_values) if atr_values else "N/A"
+
+    def _format_atr_from_klines(self, klines: dict[str, list[dict[str, Any]]]) -> str:
+        weights = {"5m": 0.4, "15m": 0.3, "1h": 0.2, "4h": 0.1}
+        atr_values: list[str] = []
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for interval, weight in weights.items():
+            series = klines.get(interval, [])
+            atr_pct = self._calculate_atr_pct(series, 14)
+            if atr_pct is None:
+                continue
+            atr_values.append(f"{interval}:{atr_pct:.4f}%")
+            weighted_sum += atr_pct * weight
+            total_weight += weight
+        if total_weight > 0:
+            atr_values.append(f"composite:{(weighted_sum / total_weight):.4f}%")
+        return ", ".join(atr_values) if atr_values else "N/A"
+
+    def _calculate_atr_pct(
+        self,
+        klines: list[dict[str, Any]],
+        period: int,
+    ) -> float | None:
+        if len(klines) < period + 1:
+            return None
+        true_ranges: list[float] = []
+        for i in range(1, len(klines)):
+            high = float(klines[i].get("high", 0))
+            low = float(klines[i].get("low", 0))
+            prev_close = float(klines[i - 1].get("close", 0))
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            true_ranges.append(tr)
+        if len(true_ranges) < period:
+            return None
+        atr = sum(true_ranges[-period:]) / period
+        last_close = float(klines[-1].get("close", 0))
+        if last_close <= 0 or atr <= 0:
+            return None
+        return atr / last_close * 100
 
     def _snapshot_to_dict(self, snapshot: DataSnapshot) -> dict[str, Any]:
         """Convert snapshot to serializable dict."""

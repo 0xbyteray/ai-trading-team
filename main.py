@@ -45,6 +45,7 @@ from ai_trading_team.strategy.signals import (
     SignalAggregator,
     SignalDirection,
     SignalStrength,
+    SignalType,
     Timeframe,
 )
 from ai_trading_team.strategy.state_machine import (
@@ -211,12 +212,13 @@ class TradingBot:
         self._pending_signal_ttl = 300.0
         self._last_queue_drop_log = 0.0
         self._queue_drop_log_interval = 30.0
+        self._last_signal_suppress_log = 0.0
+        self._signal_suppress_log_interval = 30.0
         self._maker_fee_rate = 0.0002
         self._taker_fee_rate = 0.0008
         self._fee_round_trip_pct = float(self._taker_fee_rate * 2 * 100)
         self._min_hold_seconds = 180.0
         self._min_close_move_pct = max(0.2, self._fee_round_trip_pct * 1.25)
-        self._min_rr_ratio = 3.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -414,46 +416,62 @@ class TradingBot:
         }
         return snapshot
 
-    def _get_atr_pct(self, snapshot: Any, interval: str, period: int = 14) -> float | None:
-        indicators = snapshot.indicators or {}
-        indicator_key = f"ATR_{period}_{interval}"
-        indicator_value = indicators.get(indicator_key)
-        if isinstance(indicator_value, (int, float)) and indicator_value > 0:
-            return float(indicator_value)
+    def _suppress_signals_by_entry_fee(
+        self,
+        snapshot: Any,
+        signals: list[Signal],
+    ) -> list[Signal]:
+        if not signals:
+            return signals
+        if not self._state_machine.has_position:
+            return signals
+        pos = self._state_machine.context.position
+        if not pos.side or pos.size <= 0:
+            return signals
+        try:
+            entry_price = float(pos.entry_price)
+        except (TypeError, ValueError):
+            return signals
+        if entry_price <= 0:
+            return signals
 
-        klines = snapshot.klines or {}
-        series = klines.get(interval, [])
-        if len(series) < period + 1:
-            return None
-        recent = series[-(period + 1) :]
-        true_ranges: list[float] = []
-        for i in range(1, len(recent)):
-            high = float(recent[i].get("high", 0))
-            low = float(recent[i].get("low", 0))
-            prev_close = float(recent[i - 1].get("close", 0))
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            true_ranges.append(tr)
-        if len(true_ranges) < period:
-            return None
-        atr = sum(true_ranges[-period:]) / period
-        last_close = float(recent[-1].get("close", 0))
-        if last_close <= 0 or atr <= 0:
-            return None
-        return atr / last_close * 100
+        current_price = None
+        if snapshot.ticker:
+            with contextlib.suppress(TypeError, ValueError):
+                current_price = float(snapshot.ticker.get("last_price", 0))
+        if not current_price or current_price <= 0:
+            current_price = self._get_current_price()
+        if not current_price or current_price <= 0:
+            return signals
 
-    def _composite_atr_pct(self, snapshot: Any) -> float | None:
-        weights = {"5m": 0.4, "15m": 0.3, "1h": 0.2, "4h": 0.1}
-        weighted_sum = 0.0
-        total_weight = 0.0
-        for interval, weight in weights.items():
-            atr_pct = self._get_atr_pct(snapshot, interval)
-            if atr_pct is None:
-                continue
-            weighted_sum += atr_pct * weight
-            total_weight += weight
-        if total_weight <= 0:
-            return None
-        return weighted_sum / total_weight
+        move_pct = abs(current_price - entry_price) / entry_price * 100
+        threshold_pct = self._fee_round_trip_pct * 1.5
+        if move_pct >= threshold_pct:
+            return signals
+
+        critical_types = {
+            SignalType.RISK_FORCE_STOP_LOSS,
+            SignalType.RISK_TRAILING_STOP,
+            SignalType.RISK_TAKE_PROFIT,
+            SignalType.ORDER_FILLED,
+            SignalType.ORDER_CANCELLED,
+            SignalType.ORDER_PARTIAL_FILL,
+        }
+        filtered = [signal for signal in signals if signal.signal_type in critical_types]
+
+        if len(filtered) != len(signals):
+            now_ts = asyncio.get_event_loop().time()
+            if now_ts - self._last_signal_suppress_log >= self._signal_suppress_log_interval:
+                self._logger.info(
+                    "Signal suppression: move %.3f%% < %.3f%% (entry %.6f, current %.6f)",
+                    move_pct,
+                    threshold_pct,
+                    entry_price,
+                    current_price,
+                )
+                self._last_signal_suppress_log = now_ts
+
+        return filtered
 
     def _queue_signals(self, signals: list[Signal]) -> None:
         if not signals:
@@ -1144,15 +1162,17 @@ class TradingBot:
                         # Update all signal sources with latest data
                         signals = self._signal_aggregator.update()
                         if signals:
-                            for signal in signals:
-                                self._logger.info(
-                                    "Signal queued: %s %s %s %s",
-                                    signal.signal_type.value,
-                                    signal.timeframe.value,
-                                    signal.strength.value,
-                                    signal.direction.value,
-                                )
-                            self._queue_signals(signals)
+                            signals = self._suppress_signals_by_entry_fee(snapshot, signals)
+                            if signals:
+                                for signal in signals:
+                                    self._logger.info(
+                                        "Signal queued: %s %s %s %s",
+                                        signal.signal_type.value,
+                                        signal.timeframe.value,
+                                        signal.strength.value,
+                                        signal.direction.value,
+                                    )
+                                self._queue_signals(signals)
 
                         # Update indicators in data pool for AI context
                         self._signal_aggregator.update_indicators()
@@ -2275,27 +2295,6 @@ class TradingBot:
         # Get market snapshot
         snapshot = self._data_pool.get_snapshot()
         snapshot = self._ensure_snapshot_position(snapshot)
-
-        leverage = self._config.trading.leverage or 1
-        risk_pct = (30.0 / leverage) * self._min_rr_ratio
-        fee_pct = self._fee_round_trip_pct * self._min_rr_ratio
-        required_move_pct = max(risk_pct, fee_pct)
-        composite_atr_pct = self._composite_atr_pct(snapshot)
-        if composite_atr_pct is not None and composite_atr_pct < required_move_pct:
-            self._logger.info(
-                "Entry skipped: ATR(weighted) %.3f%% < min %.3f%% (RR %.1fx + fees)",
-                composite_atr_pct,
-                required_move_pct,
-                self._min_rr_ratio,
-            )
-            self._notify_agent_log(
-                "OBSERVE",
-                "ATR too low",
-                f"{composite_atr_pct:.3f}% < {required_move_pct:.3f}%",
-            )
-            if self._state_machine.can_transition(StateTransition.AGENT_OBSERVE):
-                self._state_machine.transition(StateTransition.AGENT_OBSERVE)
-            return
 
         # Convert Signal to StrategySignal format for agent
         from ai_trading_team.core.signal_queue import (
