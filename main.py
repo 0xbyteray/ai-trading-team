@@ -218,7 +218,8 @@ class TradingBot:
         self._taker_fee_rate = 0.0008
         self._fee_round_trip_pct = float(self._taker_fee_rate * 2 * 100)
         self._min_hold_seconds = 180.0
-        self._min_close_move_pct = max(0.2, self._fee_round_trip_pct * 1.25)
+        self._min_trade_move_pct = self._fee_round_trip_pct * 2.0
+        self._min_close_move_pct = max(self._min_trade_move_pct, 0.2)
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -364,6 +365,88 @@ class TradingBot:
         if current and target > current:
             return current
         return target
+
+    def _get_signal_category(self, signal_type: SignalType) -> str:
+        if signal_type in (SignalType.MA_CROSS_UP, SignalType.MA_CROSS_DOWN):
+            return "ma_crossover"
+        if signal_type in (
+            SignalType.RSI_ENTER_OVERSOLD,
+            SignalType.RSI_EXIT_OVERSOLD,
+            SignalType.RSI_ENTER_OVERBOUGHT,
+            SignalType.RSI_EXIT_OVERBOUGHT,
+        ):
+            return "rsi_extreme_transition"
+        if signal_type in (SignalType.MACD_GOLDEN_CROSS, SignalType.MACD_DEATH_CROSS):
+            return "macd_crossover"
+        if signal_type in (
+            SignalType.BB_BREAK_UPPER,
+            SignalType.BB_BREAK_LOWER,
+            SignalType.BB_RETURN_UPPER,
+            SignalType.BB_RETURN_LOWER,
+        ):
+            return "bollinger_event"
+        if signal_type in (
+            SignalType.FUNDING_SPIKE_POSITIVE,
+            SignalType.FUNDING_SPIKE_NEGATIVE,
+            SignalType.FUNDING_NORMALIZE,
+        ):
+            return "funding_rate_shift"
+        if signal_type in (SignalType.LS_RATIO_SURGE, SignalType.LS_RATIO_DROP):
+            return "long_short_ratio_change"
+        if signal_type in (SignalType.OI_SURGE, SignalType.OI_DROP):
+            return "open_interest_change"
+        if signal_type in (SignalType.LIQUIDATION_LONG, SignalType.LIQUIDATION_SHORT):
+            return "liquidation_event"
+        if signal_type in (
+            SignalType.PNL_PROFIT_INCREASE,
+            SignalType.PNL_PROFIT_DECREASE,
+        ):
+            return "pnl_change"
+        if signal_type in (
+            SignalType.RISK_FORCE_STOP_LOSS,
+            SignalType.RISK_TRAILING_STOP,
+            SignalType.RISK_TAKE_PROFIT,
+        ):
+            return "risk_event"
+        if signal_type in (
+            SignalType.ORDER_FILLED,
+            SignalType.ORDER_CANCELLED,
+            SignalType.ORDER_PARTIAL_FILL,
+        ):
+            return "order_event"
+        if signal_type in (
+            SignalType.BULLISH_CONFLUENCE,
+            SignalType.BEARISH_CONFLUENCE,
+        ):
+            return "multi_signal_confluence"
+        return "signal_event"
+
+    def _sanitize_signal_for_agent(self, signal: Signal) -> dict[str, Any]:
+        return {
+            "category": self._get_signal_category(signal.signal_type),
+            "timeframe": signal.timeframe.value,
+            "source": signal.source,
+            "event": "triggered",
+        }
+
+    def _get_volatility_percent(self, snapshot: Any) -> float | None:
+        indicators = snapshot.indicators or {}
+        composite = indicators.get("ATR_14_COMPOSITE")
+        if isinstance(composite, (int, float)):
+            return float(composite)
+
+        if not snapshot.klines:
+            return None
+        klines_1m = snapshot.klines.get("1m", [])
+        if not klines_1m:
+            return None
+        last = klines_1m[-1]
+        high = self._safe_float(last.get("high")) if isinstance(last, dict) else None
+        low = self._safe_float(last.get("low")) if isinstance(last, dict) else None
+        close = self._safe_float(last.get("close")) if isinstance(last, dict) else None
+        if high is None or low is None or close is None or close <= 0:
+            return None
+        return (high - low) / close * 100
 
     def _notify_signal(self, signal_type: str, details: str) -> None:
         """Send signal notification to TUI.
@@ -1982,24 +2065,15 @@ class TradingBot:
             StrategySignal,
         )
 
-        # Create signal with position context
-        if is_bearish_signal:
-            old_type = OldSignalType.STRONG_BEARISH
-        else:
-            old_type = OldSignalType.STRONG_BULLISH
+        old_type = OldSignalType.CUSTOM
+        sanitized_signal = self._sanitize_signal_for_agent(signal)
         strategy_signal = StrategySignal(
             signal_type=old_type,
             data={
-                "new_signal_type": signal.signal_type.value,
-                "direction": signal.direction.value,
-                "strength": signal.strength.value,
-                "timeframe": signal.timeframe.value,
-                "source": signal.source,
-                "description": signal.description,
-                "context": "opposite_signal_while_in_position",
+                **sanitized_signal,
+                "context": "position_signal",
                 "current_position_side": position.side.value,
                 "current_pnl": float(position.unrealized_pnl),
-                **signal.data,
             },
             priority=3,  # High priority for opposite signals
         )
@@ -2033,9 +2107,9 @@ class TradingBot:
                     stage="Opposite Signal Processing",
                     model=decision.model,
                     input_data={
-                        "signal_type": signal.signal_type.value,
-                        "signal_data": signal.data,
-                        "context": "opposite_signal_while_in_position",
+                        "signal_type": sanitized_signal.get("category", "signal_event"),
+                        "signal_data": sanitized_signal,
+                        "context": "position_signal",
                         "position_side": position.side.value,
                         "position_pnl": float(position.unrealized_pnl),
                     },
@@ -2296,6 +2370,25 @@ class TradingBot:
         snapshot = self._data_pool.get_snapshot()
         snapshot = self._ensure_snapshot_position(snapshot)
 
+        volatility_pct = self._get_volatility_percent(snapshot)
+        if (
+            volatility_pct is not None
+            and self._min_trade_move_pct > 0
+            and volatility_pct < self._min_trade_move_pct
+        ):
+            self._logger.info(
+                "Entry skipped: volatility %.3f%% < min %.3f%%",
+                volatility_pct,
+                self._min_trade_move_pct,
+            )
+            self._notify_agent_log(
+                "OBSERVE",
+                "Low volatility",
+                f"{volatility_pct:.3f}% < {self._min_trade_move_pct:.3f}%",
+            )
+            self._state_machine.transition(StateTransition.AGENT_OBSERVE)
+            return
+
         # Convert Signal to StrategySignal format for agent
         from ai_trading_team.core.signal_queue import (
             SignalType as OldSignalType,
@@ -2304,24 +2397,13 @@ class TradingBot:
             StrategySignal,
         )
 
-        # Map new signal direction to old signal type
-        if signal.direction == SignalDirection.BULLISH:
-            old_signal_type = OldSignalType.STRONG_BULLISH
-        elif signal.direction == SignalDirection.BEARISH:
-            old_signal_type = OldSignalType.STRONG_BEARISH
-        else:
-            old_signal_type = OldSignalType.CONFLICTING_SIGNALS
+        old_signal_type = OldSignalType.CUSTOM
+        sanitized_signal = self._sanitize_signal_for_agent(signal)
 
         strategy_signal = StrategySignal(
             signal_type=old_signal_type,
             data={
-                "new_signal_type": signal.signal_type.value,
-                "direction": signal.direction.value,
-                "strength": signal.strength.value,
-                "timeframe": signal.timeframe.value,
-                "source": signal.source,
-                "description": signal.description,
-                **signal.data,
+                **sanitized_signal,
             },
             priority=2 if signal.strength.value == "moderate" else 3,
         )
@@ -2352,8 +2434,8 @@ class TradingBot:
                     stage="Signal Processing",
                     model=decision.model,
                     input_data={
-                        "signal_type": signal.signal_type.value,
-                        "signal_data": signal.data,
+                        "signal_type": sanitized_signal.get("category", "signal_event"),
+                        "signal_data": sanitized_signal,
                         "market_snapshot": decision.market_snapshot,
                     },
                     output={

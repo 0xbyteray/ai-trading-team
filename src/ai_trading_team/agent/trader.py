@@ -456,27 +456,11 @@ class LangChainTradingAgent:
             ops_str = "\n".join(ops_lines) if ops_lines else ops_str
 
         # Extract signal data for multi-factor analysis
-        signal_data = signal.data
-        factor_analysis = "N/A"
-        if "factor_analysis" in signal_data:
-            factor_lines = []
-            for fa in signal_data.get("factor_analysis", []):
-                factor_lines.append(
-                    f"- {fa.get('factor', 'N/A')}: "
-                    f"score={fa.get('score', 0):.2f}, "
-                    f"weight={fa.get('weight', 0):.2f}"
-                )
-            factor_analysis = "\n".join(factor_lines) if factor_lines else "N/A"
+        signal_type = signal.data.get("category", signal.signal_type.value)
 
         return {
-            "signal_type": signal.signal_type.value,
+            "signal_type": signal_type,
             "signal_data": json.dumps(signal.data, default=str),
-            "signal_strength": signal_data.get("strength", "unknown"),
-            "suggested_side": signal_data.get("suggested_side", "N/A"),
-            "composite_score": signal_data.get("composite_score", "N/A"),
-            "market_bias": signal_data.get("market_bias", "neutral"),
-            "volatility_ok": signal_data.get("volatility_ok", True),
-            "factor_analysis": factor_analysis,
             "ticker": ticker_str,
             "klines": klines_str,
             "orderbook": orderbook_str,
