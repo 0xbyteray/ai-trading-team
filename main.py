@@ -219,7 +219,7 @@ class TradingBot:
         self._fee_round_trip_pct = float(self._taker_fee_rate * 2 * 100)
         self._min_hold_seconds = 180.0
         self._min_trade_move_pct = self._fee_round_trip_pct * 2.0
-        self._min_close_move_pct = max(self._min_trade_move_pct, 0.2)
+        self._min_close_move_pct = max(self._min_trade_move_pct * 2.0, 0.2)
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
