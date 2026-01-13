@@ -211,6 +211,8 @@ class TradingBot:
         self._pending_signal_ttl = 300.0
         self._last_queue_drop_log = 0.0
         self._queue_drop_log_interval = 30.0
+        self._min_hold_seconds = 180.0
+        self._min_close_move_pct = 0.2
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -1804,6 +1806,39 @@ class TradingBot:
                 signal.direction.value,
             )
             return
+
+        entry_time = self._state_machine.context.position.entry_time
+        if entry_time and self._min_hold_seconds > 0:
+            held_seconds = (datetime.now() - entry_time).total_seconds()
+            if held_seconds < self._min_hold_seconds:
+                self._logger.info(
+                    "Opposite signal ignored: hold time %.0fs < min %.0fs",
+                    held_seconds,
+                    self._min_hold_seconds,
+                )
+                self._notify_agent_log(
+                    "HOLD",
+                    "Min hold time",
+                    f"{held_seconds:.0f}s < {self._min_hold_seconds:.0f}s",
+                )
+                return
+
+        current_price = self._get_current_price()
+        entry_price = float(position.entry_price) if position.entry_price else 0.0
+        if current_price > 0 and entry_price > 0 and self._min_close_move_pct > 0:
+            move_pct = abs((current_price - entry_price) / entry_price) * 100
+            if move_pct < self._min_close_move_pct:
+                self._logger.info(
+                    "Opposite signal ignored: price move %.3f%% < min %.3f%%",
+                    move_pct,
+                    self._min_close_move_pct,
+                )
+                self._notify_agent_log(
+                    "HOLD",
+                    "Min price move",
+                    f"{move_pct:.3f}% < {self._min_close_move_pct:.3f}%",
+                )
+                return
 
         if signal.strength == SignalStrength.WEAK:
             self._logger.info(
