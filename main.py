@@ -216,6 +216,7 @@ class TradingBot:
         self._fee_round_trip_pct = float(self._taker_fee_rate * 2 * 100)
         self._min_hold_seconds = 180.0
         self._min_close_move_pct = max(0.2, self._fee_round_trip_pct * 1.25)
+        self._min_rr_ratio = 3.0
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -392,6 +393,41 @@ class TradingBot:
         """
         if self._tui_app:
             self._tui_app.add_risk_event(event_type, message)
+
+    def _ensure_snapshot_position(self, snapshot: Any) -> Any:
+        if snapshot.position:
+            return snapshot
+        if not self._state_machine.has_position:
+            return snapshot
+        pos = self._state_machine.context.position
+        if not pos.side or pos.size <= 0:
+            return snapshot
+        snapshot.position = {
+            "symbol": pos.symbol,
+            "side": pos.side.value,
+            "size": float(pos.size),
+            "entry_price": float(pos.entry_price),
+            "margin": float(pos.margin),
+            "leverage": pos.leverage,
+            "unrealized_pnl": float(pos.unrealized_pnl),
+            "stop_loss_price": pos.stop_loss_price,
+        }
+        return snapshot
+
+    def _recent_range_pct(self, snapshot: Any) -> float | None:
+        klines = snapshot.klines or {}
+        for interval, count in (("15m", 8), ("5m", 12), ("1h", 4)):
+            series = klines.get(interval, [])
+            if len(series) < count:
+                continue
+            recent = series[-count:]
+            highs = [float(k.get("high", 0)) for k in recent]
+            lows = [float(k.get("low", 0)) for k in recent]
+            last_close = float(recent[-1].get("close", 0))
+            if last_close <= 0:
+                continue
+            return (max(highs) - min(lows)) / last_close * 100
+        return None
 
     def _queue_signals(self, signals: list[Signal]) -> None:
         if not signals:
@@ -1743,6 +1779,8 @@ class TradingBot:
                 )
                 return
 
+            snapshot = self._ensure_snapshot_position(snapshot)
+
             # Check if we should process this signal based on current state
             if self._state_machine.is_idle:
                 # IDLE state: process entry signals normally
@@ -1789,6 +1827,17 @@ class TradingBot:
                 signal.direction.value,
             )
             return
+        self._data_pool.update_position(
+            {
+                "symbol": position.symbol,
+                "side": position.side.value,
+                "size": float(position.size),
+                "entry_price": float(position.entry_price),
+                "unrealized_pnl": float(position.unrealized_pnl),
+                "margin": float(position.margin),
+                "leverage": position.leverage,
+            }
+        )
 
         # Determine if signal is opposite to current position
         is_long_position = position.side == Side.LONG
@@ -2199,6 +2248,28 @@ class TradingBot:
 
         # Get market snapshot
         snapshot = self._data_pool.get_snapshot()
+        snapshot = self._ensure_snapshot_position(snapshot)
+
+        leverage = self._config.trading.leverage or 1
+        risk_pct = (30.0 / leverage) * self._min_rr_ratio
+        fee_pct = self._fee_round_trip_pct * self._min_rr_ratio
+        required_move_pct = max(risk_pct, fee_pct)
+        recent_range_pct = self._recent_range_pct(snapshot)
+        if recent_range_pct is not None and recent_range_pct < required_move_pct:
+            self._logger.info(
+                "Entry skipped: range %.3f%% < min %.3f%% (RR %.1fx + fees)",
+                recent_range_pct,
+                required_move_pct,
+                self._min_rr_ratio,
+            )
+            self._notify_agent_log(
+                "OBSERVE",
+                "Range too narrow",
+                f"{recent_range_pct:.3f}% < {required_move_pct:.3f}%",
+            )
+            if self._state_machine.can_transition(StateTransition.AGENT_OBSERVE):
+                self._state_machine.transition(StateTransition.AGENT_OBSERVE)
+            return
 
         # Convert Signal to StrategySignal format for agent
         from ai_trading_team.core.signal_queue import (
