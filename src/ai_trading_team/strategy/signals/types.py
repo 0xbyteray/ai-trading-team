@@ -9,7 +9,6 @@ from typing import Any
 class Timeframe(str, Enum):
     """Trading timeframes for signals."""
 
-    M5 = "5m"
     M15 = "15m"
     H1 = "1h"
     H4 = "4h"
@@ -17,12 +16,12 @@ class Timeframe(str, Enum):
     @property
     def minutes(self) -> int:
         """Get timeframe duration in minutes."""
-        mapping = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
+        mapping = {"15m": 15, "1h": 60, "4h": 240}
         return mapping[self.value]
 
 
 # All timeframes for convenience
-ALL_TIMEFRAMES = [Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4]
+ALL_TIMEFRAMES = [Timeframe.M15, Timeframe.H1, Timeframe.H4]
 
 
 class SignalType(str, Enum):

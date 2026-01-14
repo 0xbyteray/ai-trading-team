@@ -106,7 +106,7 @@ class SignalAggregator:
 
         # Data readiness tracking
         self._is_ready = False
-        self._required_kline_intervals = ["5m", "15m", "1h", "4h"]
+        self._required_kline_intervals = ["15m", "1h", "4h"]
         self._min_klines_required = 60  # Need at least 60 klines for MA60
 
         # Initialize default signal sources
@@ -531,7 +531,7 @@ class SignalAggregator:
                     )
 
         atr_values: list[float] = []
-        weights = {"5m": 0.4, "15m": 0.3, "1h": 0.2, "4h": 0.1}
+        weights = {"15m": 0.5, "1h": 0.3, "4h": 0.2}
         weighted_sum = 0.0
         total_weight = 0.0
         for interval, weight in weights.items():

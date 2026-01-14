@@ -131,7 +131,7 @@ class BinanceDataManager:
     """
 
     # Required intervals for signal system
-    REQUIRED_INTERVALS = ["5m", "15m", "1h", "4h"]
+    REQUIRED_INTERVALS = ["15m", "1h", "4h"]
     MIN_KLINES_PER_INTERVAL = 100  # Need enough for MA60 + buffer
 
     def __init__(

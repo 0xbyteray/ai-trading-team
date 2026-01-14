@@ -329,7 +329,7 @@ class LangChainTradingAgent:
         klines_str = "N/A"
         if snapshot.klines:
             klines_parts = []
-            timeframe_order = ["5m", "15m", "1h", "4h"]
+            timeframe_order = ["15m", "1h", "4h"]
             for interval in timeframe_order:
                 klines = snapshot.klines.get(interval, [])
                 if klines:
@@ -512,7 +512,7 @@ class LangChainTradingAgent:
 
     def _format_atr(self, indicators: dict[str, Any]) -> str:
         atr_values: list[str] = []
-        for interval in ("5m", "15m", "1h", "4h"):
+        for interval in ("15m", "1h", "4h"):
             key = f"ATR_14_{interval}"
             value = indicators.get(key)
             if isinstance(value, (int, float)):
@@ -523,7 +523,7 @@ class LangChainTradingAgent:
         return ", ".join(atr_values) if atr_values else "N/A"
 
     def _format_atr_from_klines(self, klines: dict[str, list[dict[str, Any]]]) -> str:
-        weights = {"5m": 0.4, "15m": 0.3, "1h": 0.2, "4h": 0.1}
+        weights = {"15m": 0.5, "1h": 0.3, "4h": 0.2}
         atr_values: list[str] = []
         weighted_sum = 0.0
         total_weight = 0.0
