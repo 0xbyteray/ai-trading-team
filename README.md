@@ -3,6 +3,8 @@
 Multi-agent cryptocurrency trading bot that combines event-driven signals, an AI
 decision layer (LangChain), and exchange execution with independent risk controls.
 
+[Join WEEX AI Trading Hackathon](https://wedomxx.site/register?vipCode=2sa3b)
+
 ## Highlights
 
 - Event-driven signal system (MA crossover, RSI extremes, funding rate, long/short ratio)
