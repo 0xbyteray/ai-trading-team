@@ -11,7 +11,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ai_trading_team.agent.commands import AgentAction, AgentCommand
-from ai_trading_team.agent.prompts import DECISION_PROMPT, PROFIT_SIGNAL_PROMPT, SYSTEM_PROMPT
+from ai_trading_team.agent.prompts_neutral import DECISION_PROMPT, PROFIT_SIGNAL_PROMPT, SYSTEM_PROMPT
 from ai_trading_team.agent.schemas import AgentDecision
 from ai_trading_team.config import Config
 from ai_trading_team.core.data_pool import DataSnapshot
@@ -434,15 +434,17 @@ class LangChainTradingAgent:
         account_str = "N/A"
         if snapshot.account:
             acc = snapshot.account
-            available = acc.get("available", 0)
-            max_margin = available * self._config.trading.max_position_percent / 100
+            available = float(acc.get("available", 0))
+            used_margin = float(acc.get("margin", 0))
+            # 单次开仓保证金 = min(可用余额/20, 750-已用保证金)
+            single_margin = min(available / 20, 750 - used_margin)
+            single_margin = max(single_margin, 0)  # 不能为负
             account_str = (
                 f"Balance: {acc.get('balance')} USDT, "
-                f"Available: {available} USDT, "
-                f"Used Margin: {acc.get('margin')} USDT\n"
-                f"Leverage: {self._config.trading.leverage}x, "
-                f"Max Position Percent: {self._config.trading.max_position_percent}%, "
-                f"Max Usable Margin: {max_margin:.2f} USDT"
+                f"Available: {available:.2f} USDT, "
+                f"Used Margin: {used_margin:.2f} USDT\n"
+                f"Leverage: 20x (固定), "
+                f"单次最大保证金: {single_margin:.2f} USDT (可用余额/20)"
             )
 
         # Format recent operations (last 10)
