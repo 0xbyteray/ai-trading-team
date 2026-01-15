@@ -238,6 +238,12 @@ class TradingBot:
         self._last_closed_price: float | None = None
         self._last_closed_time: datetime | None = None
 
+        # Auto breakeven stop loss tracking
+        # When price moves 2% in profit direction, move SL to 0.5% profit (breakeven+)
+        self._breakeven_sl_moved = False  # Track if breakeven SL has been set for current position
+        self._breakeven_trigger_pct = 2.0  # Trigger at 2% profit
+        self._breakeven_sl_lock_pct = 0.5  # Lock in 0.5% profit
+
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
         # Force stop-loss at 25% margin loss - no agent needed
@@ -2065,8 +2071,103 @@ class TradingBot:
                                 }
                             )
 
+            # Auto breakeven stop loss check
+            # When price moves 2% in profit direction, automatically move SL to 0.5% profit
+            await self._check_auto_breakeven_sl()
+
         except Exception as e:
             self._logger.error(f"Error checking risk: {e}")
+
+    async def _check_auto_breakeven_sl(self) -> None:
+        """Check and execute auto breakeven stop loss.
+
+        When price moves 2% in profit direction, automatically move SL to lock in 0.5% profit.
+        This is executed automatically by the system, not by AI decision.
+        """
+        if self._breakeven_sl_moved:
+            # Already moved for this position
+            return
+
+        try:
+            position = await self._executor.get_position(self._execution_symbol)
+            if not position:
+                # No position, reset flag
+                self._breakeven_sl_moved = False
+                return
+
+            entry_price = float(position.entry_price)
+            current_price = self._get_current_price()
+
+            if entry_price <= 0 or current_price <= 0:
+                return
+
+            # Calculate price movement percentage in profit direction
+            if position.side == Side.LONG:
+                price_movement_pct = ((current_price - entry_price) / entry_price) * 100
+            else:  # SHORT
+                price_movement_pct = ((entry_price - current_price) / entry_price) * 100
+
+            # Check if trigger threshold reached (2% profit)
+            if price_movement_pct < self._breakeven_trigger_pct:
+                return
+
+            # Calculate breakeven+ stop loss price (lock in 0.5% profit)
+            if position.side == Side.LONG:
+                # Long: SL = entry * (1 + 0.5%) = entry * 1.005
+                new_stop_loss = entry_price * (1 + self._breakeven_sl_lock_pct / 100)
+            else:  # SHORT
+                # Short: SL = entry * (1 - 0.5%) = entry * 0.995
+                new_stop_loss = entry_price * (1 - self._breakeven_sl_lock_pct / 100)
+
+            self._logger.info(
+                f"AUTO BREAKEVEN: Price moved {price_movement_pct:.2f}% >= {self._breakeven_trigger_pct}%. "
+                f"Moving SL to lock in {self._breakeven_sl_lock_pct}% profit: {new_stop_loss:.4f}"
+            )
+
+            # Execute the stop loss update (only for WEEX which supports plan orders)
+            if hasattr(self._executor, "cancel_stop_loss_plans"):
+                # Cancel existing SL plans
+                await self._executor.cancel_stop_loss_plans(
+                    self._execution_symbol, position.side
+                )
+
+                if hasattr(self._executor, "place_stop_loss_plan"):
+                    # Place new breakeven+ SL
+                    sl_plan_id = await self._executor.place_stop_loss_plan(
+                        symbol=self._execution_symbol,
+                        side=position.side,
+                        size=float(position.size),
+                        trigger_price=new_stop_loss,
+                    )
+                    if sl_plan_id:
+                        self._breakeven_sl_moved = True
+                        self._logger.info(
+                            f"AUTO BREAKEVEN SL placed: {new_stop_loss:.4f} (plan: {sl_plan_id})"
+                        )
+                        self._notify_agent_log(
+                            "BREAKEVEN",
+                            f"SL moved to +{self._breakeven_sl_lock_pct}%",
+                            f"Lock profit at {new_stop_loss:.4f}",
+                        )
+
+                        # Record operation
+                        self._data_pool.add_operation(
+                            {
+                                "timestamp": datetime.now().isoformat(),
+                                "action": "auto_breakeven_sl",
+                                "side": position.side.value,
+                                "entry_price": entry_price,
+                                "new_stop_loss": new_stop_loss,
+                                "price_movement_pct": price_movement_pct,
+                                "lock_pct": self._breakeven_sl_lock_pct,
+                                "result": "success",
+                            }
+                        )
+                    else:
+                        self._logger.warning("Failed to place breakeven SL plan order")
+
+        except Exception as e:
+            self._logger.error(f"Error in auto breakeven SL check: {e}")
 
     async def _process_signal(self, signal: Signal) -> None:
         """Process a trading signal through the agent.
