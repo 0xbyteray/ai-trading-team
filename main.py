@@ -1484,7 +1484,6 @@ class TradingBot:
             Timeframe enum or None
         """
         mapping = {
-            "5m": Timeframe.M5,
             "15m": Timeframe.M15,
             "1h": Timeframe.H1,
             "4h": Timeframe.H4,
@@ -2408,6 +2407,29 @@ class TradingBot:
                 self._notify_agent_log("REDUCE", "Invalid size", "Skipping")
                 return
 
+            # Profit check: Only allow reduce when price moved ≥1% in favorable direction
+            # Per prompts: 盈利≥1%时才允许平仓/减仓
+            entry_price = float(position.entry_price)
+            current_price = self._get_current_price()
+            if entry_price > 0 and current_price > 0:
+                if position.side == Side.LONG:
+                    price_movement_pct = ((current_price - entry_price) / entry_price) * 100
+                else:  # SHORT
+                    price_movement_pct = ((entry_price - current_price) / entry_price) * 100
+
+                MIN_PROFIT_MOVEMENT_PCT = 1.0  # 1% price movement required
+                if price_movement_pct < MIN_PROFIT_MOVEMENT_PCT:
+                    self._logger.warning(
+                        f"REDUCE rejected: price movement {price_movement_pct:.2f}% < {MIN_PROFIT_MOVEMENT_PCT}%. "
+                        f"Per prompts: only allow reduce when profit >= 1%"
+                    )
+                    self._notify_agent_log(
+                        "REDUCE",
+                        "Profit too low",
+                        f"Movement {price_movement_pct:.2f}% < 1%",
+                    )
+                    return
+
             # Cap reduce size to position size
             position_size = float(position.size)
             if reduce_size >= position_size:
@@ -2493,6 +2515,44 @@ class TradingBot:
                 self._notify_agent_log("ADD", "Invalid size", "Skipping")
                 return
 
+            # Profit check: Only allow add when profitable (per prompts: 只有盈利时才允许加仓)
+            entry_price = float(position.entry_price)
+            current_price = self._get_current_price()
+            if entry_price > 0 and current_price > 0:
+                if position.side == Side.LONG:
+                    price_movement_pct = ((current_price - entry_price) / entry_price) * 100
+                else:  # SHORT
+                    price_movement_pct = ((entry_price - current_price) / entry_price) * 100
+
+                if price_movement_pct <= 0:
+                    self._logger.warning(
+                        f"ADD rejected: position not profitable. "
+                        f"Price movement {price_movement_pct:.2f}%. "
+                        f"Per prompts: only add when profitable (顺势加仓)"
+                    )
+                    self._notify_agent_log(
+                        "ADD",
+                        "Not profitable",
+                        f"Movement {price_movement_pct:.2f}% <= 0",
+                    )
+                    return
+
+            # Add count limit: Max 2 adds (total 3 entries including initial)
+            # Per prompts: 单方向最多加仓2次（含首次开仓共3笔）
+            MAX_ADD_COUNT = 2
+            current_add_count = self._session_manager.get_add_count(position.side.value)
+            if current_add_count >= MAX_ADD_COUNT:
+                self._logger.warning(
+                    f"ADD rejected: max add count {MAX_ADD_COUNT} reached. "
+                    f"Current adds: {current_add_count}"
+                )
+                self._notify_agent_log(
+                    "ADD",
+                    "Max adds reached",
+                    f"{current_add_count}/{MAX_ADD_COUNT}",
+                )
+                return
+
             snapshot = self._data_pool.get_snapshot()
             volatility_pct = self._get_volatility_percent(snapshot)
             if volatility_pct is None:
@@ -2525,8 +2585,7 @@ class TradingBot:
             if current_price <= 0:
                 self._logger.warning("ADD rejected: invalid current price")
                 return
-            leverage = self._config.trading.leverage or 1
-            stop_loss_offset = 0.30 / leverage
+            stop_loss_offset = 0.01  # 1% price movement for stop loss (per prompts)
             if position.side == Side.LONG:
                 stop_loss_price = current_price * (1 - stop_loss_offset)
             else:
@@ -2559,6 +2618,39 @@ class TradingBot:
 
             if order:
                 self._logger.info(f"Added {add_size} to position: {order.order_id}")
+
+                # After add, recalculate SL/TP based on new average entry price
+                # Fetch updated position to get new average price
+                updated_position = await self._executor.get_position(self._execution_symbol)
+                if updated_position:
+                    new_entry_price = float(updated_position.entry_price)
+                    new_size = float(updated_position.size)
+
+                    # Calculate new SL/TP based on average entry
+                    sl_offset = 0.01  # 1% stop loss
+                    if position.side == Side.LONG:
+                        new_stop_loss = new_entry_price * (1 - sl_offset)
+                    else:
+                        new_stop_loss = new_entry_price * (1 + sl_offset)
+
+                    # Update SL plan orders (only for WEEX which supports plan orders)
+                    if hasattr(self._executor, "cancel_stop_loss_plans"):
+                        await self._executor.cancel_stop_loss_plans(
+                            self._execution_symbol, position.side
+                        )
+
+                        if hasattr(self._executor, "place_stop_loss_plan"):
+                            sl_plan_id = await self._executor.place_stop_loss_plan(
+                                symbol=self._execution_symbol,
+                                side=position.side,
+                                size=new_size,
+                                trigger_price=new_stop_loss,
+                            )
+                            if sl_plan_id:
+                                self._logger.info(
+                                    f"Updated SL after add: {new_stop_loss:.4f} (plan: {sl_plan_id})"
+                                )
+
                 self._notify_agent_log(
                     "ADD",
                     f"Added {add_size:.4f}",
@@ -2777,7 +2869,7 @@ class TradingBot:
 
         # Constants for risk control
         MAX_MARGIN_LIMIT = 750.0  # Maximum margin usage in USDT
-        STOP_LOSS_PERCENT = 30.0  # Stop loss at 30% margin loss
+        STOP_LOSS_PERCENT = 1.0  # Stop loss at 1% price movement (per prompts)
 
         try:
             if command.action == AgentAction.OPEN:
@@ -2816,6 +2908,10 @@ class TradingBot:
                     available_balance = float(account.available_balance)
                     max_margin_limit = min(MAX_MARGIN_LIMIT, available_balance)
 
+                    # 1/20 Rule: Each open/add uses at most 1/20 (5%) of available balance
+                    MAX_SINGLE_MARGIN_RATIO = 20  # Max single margin = available / 20
+                    max_single_margin = available_balance / MAX_SINGLE_MARGIN_RATIO
+
                     # Get current price for margin calculation
                     current_price = float(
                         snapshot.ticker.get("last_price", 0) if snapshot.ticker else 0
@@ -2827,11 +2923,16 @@ class TradingBot:
                     # Calculate margin for this order
                     # Margin = Position Value / Leverage = (Size * Price) / Leverage
                     leverage = self._config.trading.leverage
-                    max_size = ((max_margin_limit - current_margin) * leverage) / current_price
+
+                    # Apply both limits: total 750 USDT and 1/20 per order
+                    remaining_margin = max_margin_limit - current_margin
+                    effective_margin = min(remaining_margin, max_single_margin)
+                    max_size = (effective_margin * leverage) / current_price
                     if max_size <= 0:
                         self._logger.warning(
                             f"Order rejected: margin limit reached. "
-                            f"Current: ${current_margin:.2f}, Limit: ${max_margin_limit:.2f}"
+                            f"Current: ${current_margin:.2f}, Limit: ${max_margin_limit:.2f}, "
+                            f"Single order limit: ${max_single_margin:.2f}"
                         )
                         self._notify_risk_event(
                             "MARGIN_LIMIT",
@@ -2844,7 +2945,7 @@ class TradingBot:
                         self._logger.warning(
                             f"Order size adjusted to fit margin limit. "
                             f"Requested: {command.size:.6f}, Allowed: {order_size:.6f}, "
-                            f"Limit: ${max_margin_limit:.2f}"
+                            f"Limit: ${max_margin_limit:.2f}, 1/20 Rule: ${max_single_margin:.2f}"
                         )
 
                     order_margin = (order_size * current_price) / leverage
@@ -2861,10 +2962,10 @@ class TradingBot:
                         )
                         return False
 
-                    # Calculate stop loss price at 30% margin loss
-                    # For LONG: Stop Price = Entry * (1 - 30% / Leverage)
-                    # For SHORT: Stop Price = Entry * (1 + 30% / Leverage)
-                    stop_loss_offset = STOP_LOSS_PERCENT / 100 / leverage
+                    # Calculate stop loss price at 1% price movement (per prompts)
+                    # For LONG: Stop Price = Entry * 0.99
+                    # For SHORT: Stop Price = Entry * 1.01
+                    stop_loss_offset = STOP_LOSS_PERCENT / 100  # 1% price movement
                     if command.side == Side.LONG:
                         stop_loss_price = current_price * (1 - stop_loss_offset)
                     else:  # SHORT

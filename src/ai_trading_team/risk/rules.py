@@ -67,7 +67,7 @@ class RiskRule(ABC):
 class StopLossRule(RiskRule):
     """Fixed stop loss rule."""
 
-    stop_loss_percent: Decimal = Decimal("2.0")
+    stop_loss_percent: Decimal = Decimal("1.0")  # Synced with prompts: 1% SL
 
     def evaluate(
         self,
@@ -104,7 +104,7 @@ class StopLossRule(RiskRule):
 class TakeProfitRule(RiskRule):
     """Fixed take profit rule."""
 
-    take_profit_percent: Decimal = Decimal("4.0")
+    take_profit_percent: Decimal = Decimal("5.0")  # Synced with prompts: 5% TP
 
     def evaluate(
         self,
@@ -374,3 +374,80 @@ class TrailingStopRule(RiskRule):
             "trail_distance_percent": float(self.trail_distance_percent),
             "highest_profit_percent": float(self._highest_profit_percent),
         }
+
+
+@dataclass
+class MaxPositionSizeRule(RiskRule):
+    """Maximum position size rule.
+
+    Enforces the 750 USDT maximum margin limit for total position size.
+    Per prompts: "总仓位占用保证金 ≤ 750 USDT"
+
+    This is a PRE-TRADE validation rule that should be checked before
+    opening or adding to positions.
+    """
+
+    name: str = "max_position_size"
+    max_margin_usdt: Decimal = Decimal("750.0")  # Maximum total margin allowed
+
+    def evaluate(
+        self,
+        snapshot: DataSnapshot,
+        position: Position | None,
+        account: Account,
+    ) -> RiskAction | None:
+        """Check if position margin exceeds maximum allowed.
+
+        This rule is primarily for pre-trade validation, but also monitors
+        existing positions in case they grow beyond limits.
+        """
+        if not position:
+            return None
+
+        # Check if current position margin exceeds max
+        if position.margin > float(self.max_margin_usdt):
+            return RiskAction(
+                action_type="reduce",
+                symbol=position.symbol,
+                reason=(
+                    f"MAX POSITION SIZE EXCEEDED: Current margin {position.margin:.2f} USDT "
+                    f"> max allowed {self.max_margin_usdt} USDT. Reduce position size."
+                ),
+                priority=90,  # High priority
+                data={
+                    "current_margin": float(position.margin),
+                    "max_margin": float(self.max_margin_usdt),
+                    "excess_margin": float(position.margin) - float(self.max_margin_usdt),
+                },
+            )
+
+        return None
+
+    def validate_new_order(
+        self,
+        current_margin: float,
+        new_order_margin: float,
+    ) -> tuple[bool, str]:
+        """Validate if a new order would exceed position size limits.
+
+        Args:
+            current_margin: Current position margin in USDT
+            new_order_margin: Margin required for the new order
+
+        Returns:
+            Tuple of (is_valid, reason)
+        """
+        total_margin = current_margin + new_order_margin
+
+        if total_margin > float(self.max_margin_usdt):
+            return (
+                False,
+                f"Order rejected: Total margin {total_margin:.2f} USDT would exceed "
+                f"max {self.max_margin_usdt} USDT (current: {current_margin:.2f}, "
+                f"new: {new_order_margin:.2f})",
+            )
+
+        return (True, "")
+
+    def get_config(self) -> dict[str, Any]:
+        return {"max_margin_usdt": float(self.max_margin_usdt)}

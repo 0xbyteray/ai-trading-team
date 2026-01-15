@@ -388,3 +388,38 @@ class SessionManager:
             "pending_signals": len(self._state.pending_signals),
             "last_updated": self._state.last_updated,
         }
+
+    def get_add_count(self, side: str) -> int:
+        """Get the number of ADD operations for a position side.
+
+        Counts "add" operations from the current session's operations list
+        for the given side. Resets when position is closed.
+
+        Args:
+            side: Position side ("long" or "short")
+
+        Returns:
+            Number of add operations for the given side
+        """
+        if not self._state:
+            return 0
+
+        count = 0
+        for op in self._state.operations:
+            if op.get("action") == "add" and op.get("side") == side:
+                count += 1
+        return count
+
+    def reset_add_count(self) -> None:
+        """Reset add count by clearing add operations from history.
+
+        Called when a position is closed to reset the add counter.
+        """
+        if not self._state:
+            return
+
+        # Remove add operations from history when position closes
+        self._state.operations = [
+            op for op in self._state.operations if op.get("action") != "add"
+        ]
+        self._dirty = True
