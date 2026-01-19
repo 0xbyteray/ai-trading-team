@@ -11,7 +11,6 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ai_trading_team.agent.commands import AgentAction, AgentCommand
-from ai_trading_team.agent.prompts_neutral import DECISION_PROMPT, PROFIT_SIGNAL_PROMPT, SYSTEM_PROMPT
 from ai_trading_team.agent.schemas import AgentDecision
 from ai_trading_team.config import Config
 from ai_trading_team.core.data_pool import DataSnapshot
@@ -38,6 +37,42 @@ class LangChainTradingAgent:
         self._symbol = symbol
         self._llm_timeout_seconds = 60.0
         self._llm = self._create_llm()
+        self._prompts = self._load_prompts()
+
+    def _load_prompts(self) -> dict[str, str]:
+        """Load prompts based on config.trading.prompt_style.
+
+        Returns:
+            Dict with SYSTEM_PROMPT, DECISION_PROMPT, PROFIT_SIGNAL_PROMPT
+        """
+        style = self._config.trading.prompt_style
+
+        if style == "long":
+            from ai_trading_team.agent.prompts_long import (
+                DECISION_PROMPT,
+                PROFIT_SIGNAL_PROMPT,
+                SYSTEM_PROMPT,
+            )
+        elif style == "short":
+            from ai_trading_team.agent.prompts import (
+                DECISION_PROMPT,
+                PROFIT_SIGNAL_PROMPT,
+                SYSTEM_PROMPT,
+            )
+        else:  # neutral (default)
+            from ai_trading_team.agent.prompts_neutral import (
+                DECISION_PROMPT,
+                PROFIT_SIGNAL_PROMPT,
+                SYSTEM_PROMPT,
+            )
+
+        logger.info(f"Loaded prompt style: {style}")
+
+        return {
+            "system": SYSTEM_PROMPT,
+            "decision": DECISION_PROMPT,
+            "profit_signal": PROFIT_SIGNAL_PROMPT,
+        }
 
     def _create_llm(self) -> Any:
         """Create LangChain LLM client."""
@@ -74,8 +109,8 @@ class LangChainTradingAgent:
 
         # Create messages
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=DECISION_PROMPT.format(**context)),
+            SystemMessage(content=self._prompts["system"]),
+            HumanMessage(content=self._prompts["decision"].format(**context)),
         ]
 
         try:
@@ -630,8 +665,8 @@ class LangChainTradingAgent:
 
         # Create messages
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=PROFIT_SIGNAL_PROMPT.format(**context)),
+            SystemMessage(content=self._prompts["system"]),
+            HumanMessage(content=self._prompts["profit_signal"].format(**context)),
         ]
 
         try:

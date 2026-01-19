@@ -29,6 +29,7 @@ class TradingConfig:
     leverage: int = 20  # Default 20x leverage (competition limit)
     max_position_percent: float = 75.0  # Max 75% of available balance for positions
     dry_run: bool = False  # Simulate trades without real execution
+    prompt_style: str = "neutral"  # Prompt style: "neutral", "long" (bullish), "short" (bearish)
 
 
 @dataclass
@@ -76,12 +77,18 @@ class Config:
         leverage_raw = int(os.getenv("TRADING_LEVERAGE", "20"))
         leverage = min(max(leverage_raw, 1), 20)
 
+        # Validate prompt_style
+        prompt_style_raw = os.getenv("PROMPT_STYLE", "neutral").strip().lower()
+        if prompt_style_raw not in ("neutral", "long", "short"):
+            prompt_style_raw = "neutral"
+
         trading = TradingConfig(
             symbol=os.getenv("TRADING_SYMBOL", "BTCUSDT"),
             exchange=os.getenv("TRADING_EXCHANGE", "weex").strip().lower(),
             leverage=leverage,
             max_position_percent=float(os.getenv("TRADING_MAX_POSITION_PERCENT", "75.0")),
             dry_run=os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes"),
+            prompt_style=prompt_style_raw,
         )
 
         telegram = TelegramConfig(
