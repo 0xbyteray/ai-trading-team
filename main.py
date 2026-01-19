@@ -30,6 +30,7 @@ from ai_trading_team.agent.schemas import AgentDecision
 from ai_trading_team.agent.trader import LangChainTradingAgent
 from ai_trading_team.config import Config
 from ai_trading_team.core.data_pool import DataPool
+from ai_trading_team.core.health import HealthMonitor
 from ai_trading_team.core.session import SessionManager
 from ai_trading_team.core.types import EventType, OrderType, Side
 from ai_trading_team.data.manager import BinanceDataManager
@@ -243,6 +244,15 @@ class TradingBot:
         self._breakeven_sl_moved = False  # Track if breakeven SL has been set for current position
         self._breakeven_trigger_pct = 2.0  # Trigger at 2% profit
         self._breakeven_sl_lock_pct = 0.5  # Lock in 0.5% profit
+
+        # Health monitor for periodic status logging (every 60 seconds)
+        self._health_monitor = HealthMonitor(
+            data_manager=self._data_manager,
+            executor=self._executor,
+            data_pool=self._data_pool,
+            state_machine=self._state_machine,
+            interval_seconds=60,
+        )
 
     def _setup_risk_rules(self) -> None:
         """Configure risk control rules per STRATEGY.md."""
@@ -1160,6 +1170,9 @@ class TradingBot:
         asyncio.create_task(self._market_metrics_loop())
         asyncio.create_task(self._signal_update_loop())
         asyncio.create_task(self._state_save_loop())
+
+        # Start health monitor (logs status every 60 seconds)
+        await self._health_monitor.start()
 
         # Main loop
         await self._run_loop()
