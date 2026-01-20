@@ -22,7 +22,7 @@ def create_llm(config: Config) -> Any:
     from pydantic import SecretStr
 
     return ChatAnthropic(
-        model_name="MiniMax-M2.1",
+        model_name=config.api.model_name,
         api_key=SecretStr(config.api.anthropic_api_key),
         base_url=config.api.anthropic_base_url,
         max_tokens_to_sample=4096,

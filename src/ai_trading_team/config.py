@@ -13,6 +13,7 @@ class APIConfig:
 
     anthropic_base_url: str = ""
     anthropic_api_key: str = ""
+    model_name: str = ""
     binance_api_key: str = ""
     binance_api_secret: str = ""
     weex_api_key: str = ""
@@ -67,6 +68,7 @@ class Config:
         api = APIConfig(
             anthropic_base_url=os.getenv("ANTHROPIC_BASE_URL", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            model_name=os.getenv("MODEL_NAME", ""),
             binance_api_key=os.getenv("BINANCE_API_KEY", ""),
             binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
             weex_api_key=os.getenv("WEEX_API_KEY", ""),

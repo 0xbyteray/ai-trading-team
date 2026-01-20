@@ -80,7 +80,7 @@ class LangChainTradingAgent:
         from pydantic import SecretStr
 
         return ChatAnthropic(
-            model_name="MiniMax-M2.1",
+            model_name=self._config.api.model_name,
             api_key=SecretStr(self._config.api.anthropic_api_key),
             base_url=self._config.api.anthropic_base_url,
             max_tokens_to_sample=2048,
@@ -143,7 +143,7 @@ class LangChainTradingAgent:
                 market_snapshot=self._snapshot_to_dict(snapshot),
                 command=command,
                 timestamp=datetime.now(),
-                model="MiniMax-M2.1",
+                model=self._config.api.model_name,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
@@ -169,7 +169,7 @@ class LangChainTradingAgent:
                     reason="Agent timeout after 60 seconds. Observing for safety.",
                 ),
                 timestamp=datetime.now(),
-                model="MiniMax-M2.1",
+                model=self._config.api.model_name,
                 latency_ms=latency_ms,
             )
         except Exception as e:
@@ -186,7 +186,7 @@ class LangChainTradingAgent:
                     reason=f"Agent error: {e}. Observing for safety.",
                 ),
                 timestamp=datetime.now(),
-                model="MiniMax-M2.1",
+                model=self._config.api.model_name,
                 latency_ms=latency_ms,
             )
 
@@ -699,7 +699,7 @@ class LangChainTradingAgent:
                 market_snapshot=self._snapshot_to_dict(snapshot),
                 command=command,
                 timestamp=datetime.now(),
-                model="MiniMax-M2.1",
+                model=self._config.api.model_name,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
@@ -726,7 +726,7 @@ class LangChainTradingAgent:
                     reason="Agent timeout after 60 seconds. Observing for safety.",
                 ),
                 timestamp=datetime.now(),
-                model="MiniMax-M2.1",
+                model=self._config.api.model_name,
                 latency_ms=latency_ms,
             )
         except Exception as e:
@@ -742,6 +742,6 @@ class LangChainTradingAgent:
                     reason=f"Agent error: {e}. Observing for safety.",
                 ),
                 timestamp=datetime.now(),
-                model="MiniMax-M2.1",
+                model=self._config.api.model_name,
                 latency_ms=latency_ms,
             )
